@@ -1,0 +1,23 @@
+# 大文件与运行时产物
+models/
+llama/
+data/
+wheels/
+release/
+llama.cpp/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+build/
+*.spec.bak
+
+# 前端
+node_modules/
+frontend/dist/
+
+# 打包产物
+backend/build/
+backend/dist/
