@@ -74,6 +74,15 @@ class ProjectContextTest(unittest.TestCase):
         self.assertIn("依赖", overview)
         self.assertIn("被以下文件引用", overview)
 
+    def test_project_overview_prioritizes_architecture_over_file_dump(self) -> None:
+        overview = project_index.project_overview(
+            self.index, "pkg/service.py", max_chars=4000)
+
+        self.assertIn("入口点", overview)
+        self.assertIn("中心模块", overview)
+        self.assertIn("公共 API", overview)
+        self.assertNotIn("Python 文件地图", overview)
+
     def test_related_sources_resolves_alias_method_and_transitive_call(self) -> None:
         code = "repo = Storage()\nreturn repo.save(value)"
         sources = project_index.related_sources(

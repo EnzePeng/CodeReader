@@ -11,13 +11,23 @@ llama.cpp/
 __pycache__/
 *.pyc
 .venv/
+.uv-cache/
+.npm-cache/
+.pnpm-store/
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
 build/
 *.spec.bak
 
 # 前端
 node_modules/
 frontend/dist/
+.test-dist/
 
 # 打包产物
 backend/build/
 backend/dist/
+backend/tmp_*/

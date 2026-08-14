@@ -9,8 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import uvicorn
 
-from app.config import get_config
-from app.main import app
+from app.config import get_config, validate_bind_host
+from app.main import create_app
+from app.security import SecuritySettings
 
 
 def main() -> None:
@@ -21,7 +22,12 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
     args = parser.parse_args()
 
-    url = f"http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{args.port}"
+    try:
+        args.host = validate_bind_host(args.host)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    url = f"http://{args.host}:{args.port}"
 
     import socket
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -38,7 +44,9 @@ def main() -> None:
     if not args.no_browser:
         threading.Timer(1.5, webbrowser.open, args=[url]).start()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    application = create_app(
+        security_settings=SecuritySettings.production(args.host, args.port))
+    uvicorn.run(application, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

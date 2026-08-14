@@ -3,10 +3,17 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=24",
+    "npm": ">=11"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:state",
+    "test:state": "tsc -p tsconfig.test.json && node ../.test-dist/tests/state.test.js && node ../.test-dist/tests/scope.test.js"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -19,11 +26,8 @@
   "devDependencies": {
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "@vitejs/plugin-react": "^4.3.4",
-    "typescript": "^5.7.3",
-    "vite": "^5.4.11"
-  },
-  "allowScripts": {
-    "esbuild@0.21.5": true
+    "@vitejs/plugin-react": "^6.0.4",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.0"
   }
 }

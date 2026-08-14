@@ -1,4 +1,4 @@
-import * as monaco from 'monaco-editor'
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
 
 // 自定义 Monaco 主题：与 styles.css 的设计 token 对齐（docs/ui-redesign.md §5.4）。
 // 编辑器背景 = --bg-app(#131318)，语法色全部从强调色 #7A9BFF 同族派生，克制的 6~7 色。

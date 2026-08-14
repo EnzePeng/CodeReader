@@ -13,6 +13,9 @@
 - **双栏联动**：点击右侧解读卡片，左侧代码高亮滚动到对应行；点击代码行，右侧定位对应卡片
 - **结构大纲**：类 / 函数大纲导航，点击跳转
 - **项目级追问**：拖选代码行可针对片段提问；不选代码也会携带当前文件内容/结构骨架、项目地图、上下游调用和递归依赖源码，适合询问「这个函数在哪」「谁调用它」「数据如何流动」「这个文件在项目中负责什么」
+- **可验证代码证据**：总览、分段和追问在正文前返回项目内证据，引用可跳转到文件与行号；定义和引用问题优先返回索引事实
+- **增量 Python 索引**：SQLite 持久化符号、调用、反向引用与 FTS5 文本块，只重建发生变化的文件，并展示索引状态
+- **专业导航**：支持 `Ctrl+P` 文件搜索、`Ctrl+Shift+O` 项目符号、`F12` 定义、`Shift+F12` 引用以及 `Alt+Left/Right` 导航历史
 - **模型切换**：顶栏下拉框可在 `models/` 目录内的多个 GGUF 之间切换（约 10~30 秒重载），选择会写回 config.json，下次启动仍然生效
 - **思考模式开关**：使用 Qwen3.5 等思考型模型时，顶栏显示「思考开/关」按钮；关闭时秒级响应（默认），开启后模型先推理再作答、解读更深入但更慢；两种结果分别缓存
 - **项目感知缓存**：解读结果按当前代码、模型、思考状态和项目索引指纹缓存；其他文件的相关实现变化后不会继续误用旧的跨文件解读
@@ -34,12 +37,12 @@ code-reader/
 
 ## 开发模式运行
 
-要求：Python 3.9+、Node 20+（仅开发时需要）、NVIDIA GPU（8GB 显存即可）
+要求：Python 3.13、Node 24 LTS（仅开发时需要）、NVIDIA GPU（8GB 显存即可）
 
 ```powershell
 # 1. 后端依赖
 cd backend
-pip install -r requirements.txt
+uv sync --frozen --all-groups
 
 # 2. 前端构建（或 npm run dev 起开发服务器，已配置 /api 代理）
 cd ../frontend
@@ -81,7 +84,7 @@ CodeReader/
 | 键 | 说明 |
 | --- | --- |
 | `app_port` | Web 界面端口（默认 8710） |
-| `llama.model` | GGUF 模型路径（相对 exe/项目根目录或绝对路径）；在界面顶栏切换模型会自动改写此项 |
+| `llama.model` | `models/` 下的 GGUF 文件名；不接受绝对路径或 `..` |
 | `llama.think_prefill` | 思考块预填策略：`auto`（按模型名判断，qwen3/qwq 等思考型自动启用）/ `on` / `off` |
 | `llama.ctx_size` | 上下文长度（默认 8192，显存紧张可降到 4096） |
 | `llama.n_gpu_layers` | GPU 加载层数（默认 99 全量；显存不足可调小，如 24） |
@@ -90,10 +93,10 @@ CodeReader/
 | `llama.autostart` | 是否自动拉起 llama-server（连接已有服务时设为 false 并改 base_url） |
 | `explain.segment_max_tokens` | 每段解读（简单模式）的生成上限 |
 | `explain.segment_max_tokens_detailed` | 逐行模式每段的生成上限（默认 1600） |
-| `explain.project_overview_context_chars` | 文件总览携带的项目上下文字符预算（默认 5000） |
-| `explain.project_segment_context_chars` | 单个分段解读携带的项目上下文字符预算（默认 8000） |
-| `explain.project_chat_context_chars` | 追问携带的项目地图与关联源码字符预算（默认 12000） |
-| `explain.chat_current_file_chars` | 未选中代码时携带的当前文件/结构骨架字符预算（默认 8000） |
+| `explain.project_overview_context_tokens` | 文件总览的项目证据 token 预算（默认 1250） |
+| `explain.project_segment_context_tokens` | 单个分段的项目证据 token 预算（默认 2000） |
+| `explain.project_chat_context_tokens` | 追问的项目证据 token 预算（默认 3000） |
+| `explain.chat_current_file_tokens` | 未选中代码时当前文件/结构骨架的 token 预算（默认 2000） |
 | `explain.project_dependency_depth` | 关联源码递归展开层数（默认 2） |
 
 ## 常见问题
@@ -107,9 +110,13 @@ CodeReader/
 
 ## 技术栈
 
-- 推理：llama.cpp（llama-server，OpenAI 兼容 + /completion 接口，CUDA 12.4）
-- 模型：Qwen3.5-9B Q4_K_M / qwen2.5-coder-7B Q4_K_M（8GB 显存友好，界面内可切换；思考型模型已在 ChatML 提示词层面关闭思考，保证秒级响应）
-- 项目级上下文：用 `ast` 建立文件依赖、导入别名、符号定义、方法归属、调用与反向调用关系；按“项目地图 → 直接相关源码 → 递归依赖 → 上游调用方”分层打包，并用字符预算控制噪声
+- 推理：llama.cpp（原生 `/v1/chat/completions` 与模型聊天模板；默认单 slot；随机 API key；仅监听 `127.0.0.1`）
+- 模型：Qwen3.5-9B Q4_K_M / qwen2.5-coder-7B Q4_K_M（8GB 显存友好；快速模式使用 non-thinking profile，深度模式使用 thinking profile）
+- 项目级上下文：Python 3.13 AST + SQLite/FTS5 增量索引，以精确定义/引用、调用图和 BM25 混合召回，再按模型 tokenizer 的 token 预算打包证据
 - 后端：FastAPI + httpx（SSE 流式），Python `ast` 分段，SQLite 缓存
 - 前端：React 18 + Vite + Monaco Editor + react-markdown（全部本地打包，零 CDN）
 - 打包：PyInstaller onefile
+
+## 本地安全边界
+
+CodeReader 的 HTTP API 是内部本地接口：主服务只允许 `127.0.0.1`，浏览器先建立随机 HttpOnly 会话，后续请求校验会话、Host 与 Origin。打开项目后，文件、结构、搜索、解读、追问和导出都只接受 `project_id + relative_path`；llama-server 使用独立随机 API key，并关闭 Web UI 与 slots 管理端点。

@@ -1,7 +1,7 @@
 import { MouseEvent as ReactMouseEvent, memo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ExplainMode, SegState } from '../types'
+import { Evidence, ExplainMode, SegState } from '../types'
 
 const KIND_LABEL: Record<string, string> = {
   docstring: '说明',
@@ -27,11 +27,16 @@ interface Props {
   /** 是否处于「手动选块」范围 */
   manual: boolean
   onClick: () => void
+  evidence?: Evidence[]
+  onOpenEvidence?: (evidence: Evidence) => void
   /** 以指定模式解读本段；force=true 忽略缓存重新生成 */
   onExplain: (mode: ExplainMode, force: boolean) => void
 }
 
-function SegmentCard({ state, active, explaining, ready, manual, onClick, onExplain }: Props) {
+function SegmentCard({
+  state, active, explaining, ready, manual, onClick, onExplain,
+  evidence = [], onOpenEvidence,
+}: Props) {
   const { meta, text, status, cached, mode } = state
   const otherMode: ExplainMode = mode === 'detailed' ? 'simple' : 'detailed'
 
@@ -65,11 +70,14 @@ function SegmentCard({ state, active, explaining, ready, manual, onClick, onExpl
   ].filter(Boolean).join(' ')
 
   return (
-    <div id={`card-${meta.id}`} className={cardCls} onClick={onClick}>
+    <article id={`card-${meta.id}`} className={cardCls} aria-current={active ? 'location' : undefined}>
       <div className="card-head">
-        <span className={`chip chip-${meta.kind}`}>{KIND_LABEL[meta.kind] || meta.kind}</span>
-        <span className="card-title" title={meta.title}>{meta.title}</span>
-        <span className="card-lines">{meta.start_line}~{meta.end_line} 行</span>
+        <button className="card-jump" onClick={onClick}
+          aria-label={`在代码中定位 ${meta.title}，第 ${meta.start_line} 到 ${meta.end_line} 行`}>
+          <span className={`chip chip-${meta.kind}`}>{KIND_LABEL[meta.kind] || meta.kind}</span>
+          <span className="card-title" title={meta.title}>{meta.title}</span>
+          <span className="card-lines">{meta.start_line}~{meta.end_line} 行</span>
+        </button>
         <span className="card-tools">
           {mode && (text || status === 'streaming') && (
             <span className={`chip chip-mode-${mode}`} title={`当前为${MODE_NAME[mode]}解读`}>
@@ -108,7 +116,9 @@ function SegmentCard({ state, active, explaining, ready, manual, onClick, onExpl
             </button>
           </div>
         ) : text ? (
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+          status === 'streaming'
+            ? <div className="stream-plain">{text}</div>
+            : <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
         ) : queued ? (
           <div title="排队等待解读…" aria-label="排队等待解读">
             <div className="skl" />
@@ -118,8 +128,23 @@ function SegmentCard({ state, active, explaining, ready, manual, onClick, onExpl
           <span className="dim">{status === 'streaming' ? '生成中…' : '尚未解读'}</span>
         )}
         {status === 'streaming' && <span className="caret" />}
+        {status === 'cancelled' && !text && <span className="dim">已停止，可重新生成</span>}
+        {status === 'error' && <span className="inline-error" role="alert">{state.error || '生成失败，可重试'}</span>}
+        {evidence.length > 0 && (
+          <div className="evidence-list" aria-label="本段解读引用的代码证据">
+            {evidence.map((item, index) => (
+              <button key={`${item.path}:${item.start_line}:${index}`} className="evidence-item"
+                onClick={() => onOpenEvidence?.(item)}
+                title={item.content || `${item.path}:${item.start_line}`}>
+                <span className="evidence-id">{item.id || `E${index + 1}`}</span>
+                <span>{item.symbol || item.path.split(/[\\/]/).pop()}</span>
+                <span className="evidence-loc">{item.path}:{item.start_line}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
-    </div>
+    </article>
   )
 }
 

@@ -1,16 +1,20 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { streamSSE } from '../api'
-import { ChatMsg, LineRange } from '../types'
+import { SSEEnvelope, streamJobSSE } from '../api'
+import { beginJob, cancelJob, idleJob, reduceJobEnvelope } from '../state'
+import { createDeltaBatch } from '../deltaBatch'
+import { ChatMsg, Evidence, LineRange } from '../types'
 
 interface Props {
   open: boolean
   onToggle: () => void
-  filePath: string | null
-  projectRoot: string
+  projectId: string | null
+  relativePath: string | null
+  sessionKey: string
   selection: LineRange | null
   ready: boolean
+  onOpenEvidence: (evidence: Evidence) => void
 }
 
 /* ---------- 拖拽 / 缩放：常量与工具 ---------- */
@@ -51,28 +55,50 @@ function clampPos(x: number, y: number, w: number, h: number): Pos {
 }
 
 /* 单条消息气泡。memo 化：拖拽/缩放引起的高频重渲染不必重新解析 Markdown */
-const Bubble = memo(function Bubble({ role, content, showCaret }: {
+const Bubble = memo(function Bubble({ role, content, showCaret, evidence, onOpenEvidence }: {
   role: ChatMsg['role']; content: string; showCaret: boolean
+  evidence?: Evidence[]; onOpenEvidence: (evidence: Evidence) => void
 }) {
   return (
     <div className="chat-bubble md">
       {role === 'assistant'
         ? <>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content || '…'}</ReactMarkdown>
+            {showCaret
+              ? <div className="stream-plain">{content || '…'}</div>
+              : <ReactMarkdown remarkPlugins={[remarkGfm]}>{content || '…'}</ReactMarkdown>}
             {showCaret && <span className="caret" />}
           </>
         : content}
+      {!!evidence?.length && (
+        <div className="evidence-list" aria-label="回答引用的代码证据">
+          {evidence.map((item, index) => (
+            <button className="evidence-item" key={`${item.path}:${item.start_line}:${index}`}
+              onClick={() => onOpenEvidence(item)} title={item.content || item.path}>
+              <span className="evidence-id">{item.id || `E${index + 1}`}</span>
+              <span>{item.symbol || item.path.split(/[\\/]/).pop()}</span>
+              <span className="evidence-loc">{item.path}:{item.start_line}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 })
 
-export default function ChatDrawer({ open, onToggle, filePath, projectRoot, selection, ready }: Props) {
+export default function ChatDrawer({
+  open, onToggle, projectId, relativePath, sessionKey, selection, ready, onOpenEvidence,
+}: Props) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
-  const [streaming, setStreaming] = useState(false)
   const [useSel, setUseSel] = useState(true)
   const abortRef = useRef<AbortController | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
+  const nearBottomRef = useRef(true)
+  const requestKeyRef = useRef(0)
+  const [job, setJob] = useState(() => idleJob())
+  const jobRef = useRef(job)
+  jobRef.current = job
+  const streaming = job.phase === 'running'
 
   // 面板位置/尺寸；null 表示未自定义，沿用 styles.css 的右下角默认布局
   const [pos, setPos] = useState<Pos | null>(() => {
@@ -98,12 +124,17 @@ export default function ChatDrawer({ open, onToggle, filePath, projectRoot, sele
 
   useEffect(() => {
     abortRef.current?.abort()
+    requestKeyRef.current++
     setMsgs([])
-    setStreaming(false)
-  }, [filePath])
+    const next = idleJob(requestKeyRef.current)
+    jobRef.current = next
+    setJob(next)
+    setInput('')
+    nearBottomRef.current = true
+  }, [sessionKey])
 
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
+    if (nearBottomRef.current) listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
   }, [msgs])
 
   // 打开面板及窗口尺寸变化时，把位置/尺寸重新收拢到视口内
@@ -201,51 +232,122 @@ export default function ChatDrawer({ open, onToggle, filePath, projectRoot, sele
 
   const send = () => {
     const question = input.trim()
-    if (!question || streaming || !filePath || !ready) return
+    if (!question || streaming || !relativePath || !projectId || !ready) return
     const history = msgs
-    setMsgs(m => [...m, { role: 'user', content: question }, { role: 'assistant', content: '' }])
+    setMsgs(m => [...m,
+      { role: 'user', content: question, status: 'done' },
+      { role: 'assistant', content: '', status: 'streaming', evidence: [] },
+    ])
     setInput('')
-    setStreaming(true)
+    nearBottomRef.current = true
     const ctrl = new AbortController()
     abortRef.current = ctrl
+    const requestKey = ++requestKeyRef.current
+    const started = beginJob(jobRef.current, requestKey)
+    jobRef.current = started
+    setJob(started)
     const sel = useSel && selection ? { start_line: selection.start, end_line: selection.end } : null
-    streamSSE('/api/chat', {
-      path: filePath, question, selection: sel, history,
-      project_root: projectRoot || null,
-    }, (ev, data) => {
-      if (ev === 'delta') {
-        setMsgs(m => {
-          const next = [...m]
-          const last = next[next.length - 1]
-          next[next.length - 1] = { ...last, content: last.content + data.text }
-          return next
-        })
-      } else if (ev === 'error') {
-        setMsgs(m => {
-          const next = [...m]
-          const last = next[next.length - 1]
-          next[next.length - 1] = { ...last, content: last.content + `\n\n> ${data.message}` }
-          return next
-        })
+    const updateAssistant = (fn: (message: ChatMsg) => ChatMsg) => {
+      setMsgs(current => {
+        const next = [...current]
+        const index = next.length - 1
+        if (index >= 0 && next[index].role === 'assistant') next[index] = fn(next[index])
+        return next
+      })
+    }
+    const evidenceItems = (payload: Record<string, unknown>): Evidence[] => {
+      const direct = Array.isArray(payload.items) ? payload.items : null
+      const nested = (payload.evidence && typeof payload.evidence === 'object'
+        && Array.isArray((payload.evidence as any).items))
+        ? (payload.evidence as any).items : null
+      return (direct ?? nested ?? []).filter((item: any) => item && typeof item.path === 'string') as Evidence[]
+    }
+    const deltaBatch = createDeltaBatch(chunks => {
+      const text = chunks.get('chat') ?? ''
+      if (!text) return
+      setMsgs(current => {
+        const next = [...current]
+        const last = next[next.length - 1]
+        if (last?.role === 'assistant') next[next.length - 1] = { ...last, content: last.content + text }
+        return next
+      })
+    })
+    const handleEnvelope = (envelope: SSEEnvelope) => {
+      const reduced = reduceJobEnvelope(jobRef.current, envelope, requestKey)
+      if (!reduced.accepted) return
+      jobRef.current = reduced.state
+      setJob(reduced.state)
+      const payload = envelope.payload as Record<string, any>
+      if (envelope.type === 'delta') {
+        const text = typeof payload.text === 'string' ? payload.text : ''
+        deltaBatch.push('chat', text)
+      } else if (envelope.type === 'evidence') {
+        const evidence = evidenceItems(payload)
+        updateAssistant(message => ({ ...message, evidence }))
+      } else if (envelope.type === 'complete' || envelope.type === 'done') {
+        deltaBatch.flush()
+        const result = payload.result && typeof payload.result === 'object' ? payload.result : null
+        if (typeof (result as any)?.text === 'string') {
+          updateAssistant(message => ({ ...message, content: (result as any).text }))
+        }
+        const evidence = result ? evidenceItems(result as Record<string, unknown>) : []
+        updateAssistant(message => ({
+          ...message,
+          status: 'done',
+          evidence: evidence.length ? evidence : message.evidence,
+        }))
+      } else if (envelope.type === 'cancelled') {
+        deltaBatch.flush()
+        updateAssistant(message => ({ ...message, status: 'cancelled' }))
+      } else if (envelope.type === 'error') {
+        deltaBatch.flush()
+        const message = typeof payload.message === 'string' ? payload.message : '回答失败'
+        updateAssistant(previous => ({
+          ...previous,
+          content: previous.content ? `${previous.content}\n\n> ${message}` : `> ${message}`,
+          status: 'error',
+        }))
       }
-    }, ctrl.signal)
+    }
+    streamJobSSE('/api/chat', {
+      project_id: projectId,
+      relative_path: relativePath,
+      question,
+      selection: sel,
+      history: history.map(({ role, content }) => ({ role, content })),
+    }, handleEnvelope, ctrl.signal)
       .catch(e => {
+        deltaBatch.flush()
         if ((e as Error).name !== 'AbortError') {
-          setMsgs(m => [...m.slice(0, -1), { role: 'assistant', content: `请求失败：${(e as Error).message}` }])
+          const failedEnvelope: SSEEnvelope = {
+            job_id: jobRef.current.jobId ?? `client-${requestKey}`,
+            seq: jobRef.current.lastSeq + 1,
+            type: 'error',
+            scope_id: 'chat',
+            payload: { message: `请求失败：${(e as Error).message}` },
+          }
+          handleEnvelope(failedEnvelope)
         }
       })
-      .finally(() => setStreaming(false))
   }
 
   const stop = () => {
     abortRef.current?.abort()
-    setStreaming(false)
+    const cancelled = cancelJob(jobRef.current)
+    jobRef.current = cancelled
+    setJob(cancelled)
+    setMsgs(current => {
+      const next = [...current]
+      const last = next[next.length - 1]
+      if (last?.role === 'assistant') next[next.length - 1] = { ...last, status: 'cancelled' }
+      return next
+    })
   }
 
   if (!open) {
     return (
-      <button className="chat-fab" onClick={onToggle} disabled={!filePath}
-        title={filePath ? '就当前代码提问' : '先打开一个文件'}>
+      <button className="chat-fab" onClick={onToggle} disabled={!relativePath}
+        title={relativePath ? '就当前代码提问' : '先打开一个文件'}>
         追问
       </button>
     )
@@ -266,7 +368,7 @@ export default function ChatDrawer({ open, onToggle, filePath, projectRoot, sele
   }
 
   return (
-    <div ref={panelRef} style={panelStyle}
+    <div ref={panelRef} style={panelStyle} role="dialog" aria-label="代码追问"
       className={`chat-drawer${dragMode ? ` drag-${dragMode}` : ''}`}>
       <div className="chat-head" title="按住拖动位置，双击恢复默认布局"
         onPointerDown={onHeadDown}
@@ -277,12 +379,13 @@ export default function ChatDrawer({ open, onToggle, filePath, projectRoot, sele
       >
         <span>代码追问</span>
         <span className="chat-tools">
-          <button className="icon-btn" title="清空对话" onClick={() => setMsgs([])}>清空</button>
-          <button className="icon-btn" onClick={onToggle}>×</button>
+          <button className="icon-btn" title="清空对话" disabled={streaming}
+            onClick={() => setMsgs([])}>清空</button>
+          <button className="icon-btn" onClick={onToggle} aria-label="关闭追问">×</button>
         </span>
       </div>
       <div className="chat-ctx">
-        <span className="chip chip-file" title={filePath || ''}>{filePath?.split('\\').pop()}</span>
+        <span className="chip chip-file" title={relativePath || ''}>{relativePath?.split(/[\\/]/).pop()}</span>
         {selection && (
           <label className="sel-toggle">
             <input type="checkbox" checked={useSel} onChange={e => setUseSel(e.target.checked)} />
@@ -291,7 +394,10 @@ export default function ChatDrawer({ open, onToggle, filePath, projectRoot, sele
         )}
         {!selection && <span className="dim">在左侧代码中拖选行，可针对性提问</span>}
       </div>
-      <div className="chat-list" ref={listRef}>
+      <div className="chat-list" ref={listRef} onScroll={event => {
+        const el = event.currentTarget
+        nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 56
+      }}>
         {msgs.length === 0 && (
           <div className="chat-empty">
             例如：这个函数的返回值在哪里被用到？这段正则在匹配什么？这个类的生命周期是怎样的？
@@ -300,10 +406,14 @@ export default function ChatDrawer({ open, onToggle, filePath, projectRoot, sele
         {msgs.map((m, i) => (
           <div key={i} className={`chat-msg ${m.role}`}>
             <Bubble role={m.role} content={m.content}
+              evidence={m.evidence} onOpenEvidence={onOpenEvidence}
               showCaret={streaming && i === msgs.length - 1} />
           </div>
         ))}
       </div>
+      {job.message && <div className="chat-status" role="status" aria-live="polite">{job.message}</div>}
+      {job.phase === 'cancelled' && <div className="chat-status">已停止，可继续提问</div>}
+      {job.error && <div className="chat-status err" role="alert">{job.error}</div>}
       <div className="chat-input">
         <textarea
           rows={2}

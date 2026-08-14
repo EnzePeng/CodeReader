@@ -4,19 +4,21 @@
   "llama": {
     "autostart": true,
     "server_exe": "llama/llama-server.exe",
-    "model": "models/Qwen3.5-9B.Q4_K_M.gguf",
+    "model": "Qwen3.5-9B.Q4_K_M.gguf",
     "alias": "qwen3.5-9b",
     "base_url": "http://127.0.0.1:8711",
     "host": "127.0.0.1",
     "port": 8711,
-    "ctx_size": 8192,
+    "ctx_size": 16384,
     "n_gpu_layers": 99,
     "cache_type_k": "q8_0",
     "cache_type_v": "q8_0",
-    "temperature": 0.6,
-    "top_p": 0.95,
+    "temperature": 0.2,
+    "top_p": 0.9,
     "top_k": 20,
     "thinking": false,
+    "protocol": "chat_completions",
+    "parallel": 1,
     "extra_args": []
   },
   "explain": {
@@ -26,10 +28,10 @@
     "segment_max_tokens": 900,
     "segment_max_tokens_detailed": 1600,
     "chat_max_tokens": 1200,
-    "project_overview_context_chars": 5000,
-    "project_segment_context_chars": 8000,
-    "project_chat_context_chars": 12000,
-    "chat_current_file_chars": 8000,
+    "project_overview_context_tokens": 1250,
+    "project_segment_context_tokens": 2000,
+    "project_chat_context_tokens": 3000,
+    "chat_current_file_tokens": 2000,
     "project_dependency_depth": 2
   }
 }

@@ -1,0 +1,77 @@
+name: quality-gates
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.7"
+          enable-cache: true
+      - run: uv sync --frozen --all-groups
+      - run: uv run ruff check backend
+      - run: uv run mypy backend/app
+      - run: uv run coverage run -m unittest discover -s backend -p "test_*.py"
+      - run: uv run coverage report --fail-under=80
+      - run: uv run pip-audit
+      - run: uv run python -m compileall -q backend/app
+
+  frontend:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+          package-manager-cache: true
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+
+  package-smoke:
+    runs-on: windows-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.7"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - run: uv sync --frozen --all-groups
+      - run: npm ci
+        working-directory: frontend
+      - run: powershell -ExecutionPolicy Bypass -File scripts/build_exe.ps1 -SkipModel -SkipRuntime
+      - run: powershell -ExecutionPolicy Bypass -File scripts/smoke_package.ps1

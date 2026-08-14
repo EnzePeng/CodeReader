@@ -1,11 +1,12 @@
 """中文解读的 prompt 构造、缓存键与导出报告。"""
+import json
 import time
 from typing import Any, Dict, List, Optional
 
 from . import cache
 from .config import get_config, model_id
 
-PROMPT_VERSION = "v3-project-context"
+PROMPT_VERSION = "v4-evidence-native-chat"
 
 SYSTEM_EXPLAIN = (
     "你是一位资深软件工程师，擅长把代码讲解得清晰易懂，正在帮同事读懂一个已有项目的代码。"
@@ -77,6 +78,25 @@ def segment_key(seg: Dict[str, Any], mode: str = "simple",
     return cache.make_key("segment", PROMPT_VERSION, model_id(), _think_tag(),
                           normalize_mode(mode), seg["title"],
                           sha256_text(seg["code"]), project_signature)
+
+
+def request_cache_key(*, kind: str, relative_path: str,
+                      messages: List[Dict[str, str]], mode: str = "",
+                      evidence_signature: str = "") -> str:
+    """Hash the normalized, complete semantic input of a generation request."""
+    normalized = json.dumps(
+        messages, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return cache.make_key(
+        kind,
+        PROMPT_VERSION,
+        model_id(),
+        _think_tag(),
+        relative_path.replace("\\", "/"),
+        normalize_mode(mode) if kind == "segment" else mode,
+        evidence_signature,
+        normalized,
+    )
 
 
 def imports_text(segments: List[Dict[str, Any]], max_lines: int = 30) -> str:
@@ -221,6 +241,10 @@ def build_export_markdown(display_name: str, path: str, seg_result: Dict[str, An
     lines.append(f"- 文件行数：{seg_result['total_lines']} 行，共 {len(seg_result['segments'])} 段")
     lines.append(f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"- 使用模型：{model_id()}")
+    generated = sum(1 for entry in seg_entries.values() if entry)
+    total = len(seg_result["segments"])
+    coverage = round(generated * 100 / total) if total else 100
+    lines.append(f"- 解读覆盖率：{generated}/{total} 段（{coverage}%）")
     lines.append("")
     lines.append("## 文件总览")
     lines.append("")

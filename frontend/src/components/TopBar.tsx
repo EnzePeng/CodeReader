@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getJSON, postJSON, encodePath } from '../api'
+import { useDialogFocus } from '../hooks'
 import { BrowseResult, Health } from '../types'
 
 interface ModelItem { name: string; size_gb: number | null }
@@ -7,7 +8,7 @@ interface ModelItem { name: string; size_gb: number | null }
 interface Props {
   health: Health | null
   projectRoot: string
-  onOpenProject: (path: string) => void
+  onOpenProject: (path: string) => Promise<void>
   onRefreshHealth: () => Promise<Health | null>
 }
 
@@ -27,16 +28,29 @@ function FolderPicker({ onSelect, onClose }: { onSelect: (p: string) => void; on
   const [drives, setDrives] = useState<string[]>([])
   const [dirs, setDirs] = useState<string[]>([])
   const [err, setErr] = useState('')
+  const [loading, setLoading] = useState(false)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const browseSeq = useRef(0)
+  useDialogFocus(true, dialogRef, onClose)
 
   useEffect(() => {
-    getJSON<{ drives: string[] }>('/api/drives').then(r => setDrives(r.drives)).catch(() => undefined)
+    getJSON<{ drives: string[] }>('/api/drives')
+      .then(r => setDrives(r.drives))
+      .catch(e => setErr(String((e as Error).message || e)))
   }, [])
 
   useEffect(() => {
-    if (!current) { setDirs([]); return }
+    const seq = ++browseSeq.current
+    if (!current) { setDirs([]); setLoading(false); return }
+    setDirs([])
+    setLoading(true)
     getJSON<BrowseResult>(`/api/browse?path=${encodePath(current)}`)
-      .then(r => { setDirs(r.dirs.map(d => d.name)); setErr('') })
-      .catch(e => setErr(String(e.message || e)))
+      .then(r => {
+        if (seq !== browseSeq.current) return
+        setDirs(r.dirs.map(d => d.name)); setErr('')
+      })
+      .catch(e => { if (seq === browseSeq.current) setErr(String(e.message || e)) })
+      .finally(() => { if (seq === browseSeq.current) setLoading(false) })
   }, [current])
 
   const goUp = () => {
@@ -45,31 +59,33 @@ function FolderPicker({ onSelect, onClose }: { onSelect: (p: string) => void; on
   }
 
   return (
-    <div className="modal-mask" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
+    <div className="modal-mask" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div ref={dialogRef} className="modal" role="dialog" aria-modal="true"
+        aria-labelledby="folder-picker-title" tabIndex={-1}>
         <div className="modal-head">
-          <span>选择项目目录</span>
-          <button className="btn-ghost" onClick={onClose}>×</button>
+          <span id="folder-picker-title">选择项目目录</span>
+          <button className="btn-ghost" onClick={onClose} aria-label="关闭目录选择器">×</button>
         </div>
         <div className="picker-path">
           <button className="btn-sm" onClick={goUp} disabled={!current}>上级</button>
           <span className="picker-current">{current || '请选择磁盘'}</span>
         </div>
-        {err && <div className="picker-err">{err}</div>}
-        <div className="picker-list">
+        {err && <div className="picker-err" role="alert">{err}</div>}
+        <div className="picker-list" role="list" aria-busy={loading}>
+          {loading && <div className="side-empty" role="status">正在读取目录…</div>}
           {!current
             ? drives.map(d => (
-              <div key={d} className="picker-item" onDoubleClick={() => setCurrent(d)} onClick={() => setCurrent(d)}>
+              <button key={d} className="picker-item" role="listitem" onClick={() => setCurrent(d)}>
                 <span className="chip chip-dir">盘</span>{d}
-              </div>
+              </button>
             ))
             : dirs.map(d => (
-              <div key={d} className="picker-item"
+              <button key={d} className="picker-item" role="listitem"
                 onClick={() => setCurrent(current.endsWith('\\') ? current + d : current + '\\' + d)}>
                 <span className="chip chip-dir">目录</span>{d}
-              </div>
+              </button>
             ))}
-          {current && dirs.length === 0 && !err && <div className="side-empty">没有子目录</div>}
+          {current && dirs.length === 0 && !err && !loading && <div className="side-empty">没有子目录</div>}
         </div>
         <div className="modal-foot">
           <button className="btn-primary" disabled={!current}
@@ -92,6 +108,7 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
   // 刚选中的目标模型：health 尚未反映新模型时，用它先行显示下拉框与加载态
   const [pendingModel, setPendingModel] = useState<string | null>(null)
   const [togglingThink, setTogglingThink] = useState(false)
+  const [opening, setOpening] = useState(false)
 
   const toggleThinking = async () => {
     if (!health?.thinking?.supported || togglingThink) return
@@ -135,22 +152,31 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
   }
 
   useEffect(() => { setInput(projectRoot) }, [projectRoot])
-  useEffect(() => { loadRecents() }, [projectRoot])
-
-  const loadRecents = () => {
-    getJSON<{ recents: { path: string }[] }>('/api/recents')
-      .then(r => setRecents(r.recents)).catch(() => undefined)
-  }
+  useEffect(() => {
+    try {
+      const value = JSON.parse(localStorage.getItem('cr_recent_projects') || '[]')
+      setRecents(Array.isArray(value)
+        ? value.filter(item => item && typeof item.path === 'string').slice(0, 10)
+        : [])
+    } catch { setRecents([]) }
+  }, [])
 
   const tryOpen = async (path: string) => {
     const p = path.trim().replace(/["']/g, '')
     if (!p) return
+    setOpening(true)
     try {
-      await getJSON(`/api/browse?path=${encodePath(p)}`)
+      await onOpenProject(p)
+      setRecents(previous => {
+        const next = [{ path: p }, ...previous.filter(item => item.path !== p)].slice(0, 10)
+        try { localStorage.setItem('cr_recent_projects', JSON.stringify(next)) } catch { /* optional */ }
+        return next
+      })
       setErr('')
-      onOpenProject(p)
     } catch (e) {
       setErr(String((e as Error).message || e))
+    } finally {
+      setOpening(false)
     }
   }
 
@@ -159,12 +185,12 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
   const pendingSwitch = !!pendingModel && pendingModel !== health?.model
   const loadingModel = pendingModel ?? health?.model
   const statusClass = !health
-    ? 'err'
+    ? 'busy'
     : pendingSwitch
       ? 'busy'
       : st?.ready ? 'ok' : st?.phase === 'error' ? 'err' : 'busy'
   const statusText = !health
-    ? '后端未连接'
+    ? '正在连接后端…'
     : pendingSwitch
       ? `模型加载中… · ${pendingModel}`
       : st?.ready
@@ -186,9 +212,12 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
           placeholder="输入项目目录，如 D:\work\my-project"
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') tryOpen(input) }}
+          disabled={opening}
         />
-        <button className="btn-sm" onClick={() => setShowPicker(true)}>浏览…</button>
-        <button className="btn-primary" onClick={() => tryOpen(input)}>打开</button>
+        <button className="btn-sm" onClick={() => setShowPicker(true)} disabled={opening}>浏览…</button>
+        <button className="btn-primary" onClick={() => tryOpen(input)} disabled={opening}>
+          {opening ? '打开中…' : '打开'}
+        </button>
         {recents.length > 0 && (
           <select
             className="recents"
@@ -199,7 +228,7 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
             {recents.map(r => <option key={r.path} value={r.path}>{r.path}</option>)}
           </select>
         )}
-        {err && <span className="topbar-err">{err}</span>}
+        {err && <span className="topbar-err" role="alert">{err}</span>}
       </div>
       {models.length > 1 && (
         <select

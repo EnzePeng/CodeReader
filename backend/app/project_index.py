@@ -17,6 +17,14 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from .segmenter import SKIP_DIRS
 
+# The evidence-index slice is intentionally additive.  These imports make the new
+# persistent interfaces discoverable from the historical ``project_index`` module
+# while every existing function below retains its original shape and behavior.
+from .code_index import CodeIndex, IndexStatus  # noqa: F401
+from .context_packer import ContextPacker  # noqa: F401
+from .evidence import Evidence  # noqa: F401
+from .retriever import Retriever  # noqa: F401
+
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_200_000
 TTL_SECONDS = 120.0
@@ -622,19 +630,58 @@ def _transitive_dependencies(index: Dict[str, Any], start: Dict[str, Any],
 
 def project_overview(index: Optional[Dict[str, Any]], current_rel_file: Optional[str],
                      max_chars: int = 4500) -> str:
-    """项目地图与当前文件上下游位置，始终作为全局背景提供。"""
+    """Architecture-first project map plus the current file's graph position."""
     if not index or max_chars <= 0:
         return ""
-    files = sorted(index.get("file_info", {}), key=lambda path: _norm(path).casefold())
-    shown = files[:80]
-    file_map = "、".join(_norm(path) for path in shown)
-    if len(files) > len(shown):
-        file_map += f"、…（另有 {len(files) - len(shown)} 个 Python 文件）"
+    file_info = index.get("file_info", {})
+    files = sorted(file_info, key=lambda path: _norm(path).casefold())
+
+    inbound: Dict[str, int] = {path: 0 for path in files}
+    for info in file_info.values():
+        for dependency in info.get("dependencies", []):
+            dep = dependency.get("file")
+            if dep in inbound:
+                inbound[dep] += 1
+
+    entry_names = {"main.py", "__main__.py", "app.py", "run.py", "cli.py", "manage.py"}
+    entrypoints = [
+        path for path in files
+        if Path(path).name.casefold() in entry_names
+        or any(entry.get("name") == "main" for entry in file_info[path].get("symbols", []))
+    ]
+    central = sorted(
+        (path for path in files if Path(path).name != "__init__.py"),
+        key=lambda path: (
+            -inbound.get(path, 0),
+            -len(file_info[path].get("symbols", [])),
+            -len(file_info[path].get("dependencies", [])),
+            _norm(path).casefold(),
+        ),
+    )[:8]
+    public_api: List[str] = []
+    for path in central:
+        for entry in file_info[path].get("symbols", []):
+            name = str(entry.get("name", ""))
+            if name and not name.startswith("_") and entry.get("kind") != "method":
+                public_api.append(f"{name}（{_norm(path)}）")
+            if len(public_api) >= 12:
+                break
+        if len(public_api) >= 12:
+            break
+    tests = [path for path in files if Path(path).name.startswith("test_")
+             or "tests" in {part.casefold() for part in Path(path).parts}]
     lines = [
         "## 项目全貌",
         f"- 项目包含 {index.get('files', 0)} 个可解析 Python 文件、"
         f"{sum(len(v) for v in index.get('symbols', {}).values())} 个类/函数/方法符号。",
-        f"- Python 文件地图：{file_map or '（未发现可解析 Python 文件）'}",
+        "- 入口点：" + ("、".join(_norm(path) for path in entrypoints[:10])
+                       if entrypoints else "未识别到常见入口文件"),
+        "- 中心模块：" + ("、".join(
+            f"{_norm(path)}（{inbound.get(path, 0)} 个上游模块）" for path in central)
+            if central else "未识别"),
+        "- 公共 API：" + ("、".join(public_api) if public_api else "未识别公开符号"),
+        "- 测试组织：" + ("、".join(_norm(path) for path in tests[:12])
+                         if tests else "未发现 Python 测试文件"),
     ]
 
     current = _file_info(index, current_rel_file)

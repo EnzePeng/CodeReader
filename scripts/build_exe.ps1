@@ -9,7 +9,8 @@
 
 param(
     [switch]$SkipFrontend,
-    [switch]$SkipModel
+    [switch]$SkipModel,
+    [switch]$SkipRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,13 @@ $out = Join-Path $root "release\CodeReader"
 
 Write-Host "== CodeReader 打包 ==" -ForegroundColor Cyan
 Write-Host "项目根目录: $root"
+
+$pythonVersion = uv run --frozen python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+if ($LASTEXITCODE -ne 0 -or $pythonVersion.Trim() -ne "3.13") {
+    throw "需要 Python 3.13 与已同步的 uv.lock"
+}
+$nodeMajor = [int]((node --version).TrimStart('v').Split('.')[0])
+if ($nodeMajor -lt 24) { throw "需要 Node.js 24 LTS" }
 
 # 1. 前端构建
 if (-not $SkipFrontend) {
@@ -36,7 +44,7 @@ if (-not (Test-Path (Join-Path $root "frontend\dist\index.html"))) {
 # 2. PyInstaller 打包 exe
 Write-Host "`n[2/4] PyInstaller 打包…" -ForegroundColor Cyan
 Push-Location (Join-Path $root "backend")
-python -m PyInstaller --noconfirm --clean --onefile run.py --name CodeReader `
+uv run --frozen pyinstaller --noconfirm --clean --onefile run.py --name CodeReader `
     --distpath $out `
     --workpath (Join-Path $root "backend\build") `
     --specpath (Join-Path $root "backend") `
@@ -58,8 +66,12 @@ Copy-Item (Join-Path $root "config.json") $out -Force
 
 $llamaOut = Join-Path $out "llama"
 New-Item -ItemType Directory -Force $llamaOut | Out-Null
-Copy-Item (Join-Path $root "llama\llama-server.exe") $llamaOut -Force
-Copy-Item (Join-Path $root "llama\*.dll") $llamaOut -Force
+if (-not $SkipRuntime) {
+    Copy-Item (Join-Path $root "llama\llama-server.exe") $llamaOut -Force
+    Copy-Item (Join-Path $root "llama\*.dll") $llamaOut -Force
+} else {
+    Write-Host "跳过 llama-server 运行时（仅用于 CI 启动冒烟）" -ForegroundColor Yellow
+}
 
 New-Item -ItemType Directory -Force (Join-Path $out "data") | Out-Null
 
@@ -73,6 +85,12 @@ if (-not $SkipModel) {
 }
 
 Copy-Item (Join-Path $root "README.md") (Join-Path $out "使用说明.md") -Force
+
+Get-ChildItem $out -Recurse -File | ForEach-Object {
+    $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName
+    $relative = $_.FullName.Substring($out.Length + 1)
+    "$($hash.Hash.ToLowerInvariant())  $relative"
+} | Set-Content -Encoding UTF8 (Join-Path $out "SHA256SUMS.txt")
 
 # 4. 汇总
 Write-Host "`n[4/4] 完成！" -ForegroundColor Green

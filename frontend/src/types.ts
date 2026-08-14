@@ -19,8 +19,29 @@ export interface BrowseResult {
   files: FileEntry[]
 }
 
+export interface ProjectSession {
+  project_id: string
+  /** 仅用于显示；项目内 API 一律使用 project_id + relative_path。 */
+  root: string
+  name: string
+  index_status?: IndexStatus
+}
+
+export interface IndexStatus {
+  state: 'idle' | 'building' | 'ready' | 'error' | string
+  message?: string
+  files_indexed?: number
+  files_total?: number
+  updated_at?: number
+  languages?: Record<string, number>
+  parse_errors?: Record<string, string>
+  skipped_files?: string[]
+}
+
 export interface FileInfo {
-  path: string
+  /** 兼容字段也只包含项目内相对路径，绝不包含服务端绝对根目录。 */
+  path?: string
+  relative_path: string
   name: string
   language: string
   encoding: string
@@ -68,7 +89,7 @@ export interface Structure {
   overview_cached: boolean
 }
 
-export type SegStatus = 'idle' | 'streaming' | 'done'
+export type SegStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error'
 
 export interface SegState {
   meta: SegmentMeta
@@ -77,11 +98,28 @@ export interface SegState {
   cached: boolean
   /** 当前展示文本对应的解读模式；尚未生成过时为 null */
   mode: ExplainMode | null
+  error?: string | null
+}
+
+export interface Evidence {
+  id: string
+  path: string
+  start_line: number
+  end_line: number
+  content?: string
+  source_hash?: string
+  language?: string
+  relation?: 'definition' | 'reference' | 'caller' | 'callee' | 'text' | 'file' | string
+  symbol?: string
+  score?: number
+  metadata?: Record<string, unknown>
 }
 
 export interface ChatMsg {
   role: 'user' | 'assistant'
   content: string
+  evidence?: Evidence[]
+  status?: 'streaming' | 'done' | 'cancelled' | 'error'
 }
 
 export interface LineRange {

@@ -74,6 +74,8 @@ def get_newest(keys) -> Optional[Tuple[str, str]]:
 
 
 def put(key: str, file_path: str, kind: str, content: str, model: str) -> None:
+    if not content or not content.strip():
+        return
     with _lock:
         conn = _get_conn()
         conn.execute(
@@ -81,6 +83,15 @@ def put(key: str, file_path: str, kind: str, content: str, model: str) -> None:
             (key, file_path, kind, content, model, time.time()),
         )
         conn.commit()
+
+
+def close() -> None:
+    """Close the process-local connection (application shutdown and tests)."""
+    global _conn
+    with _lock:
+        if _conn is not None:
+            _conn.close()
+            _conn = None
 
 
 def delete_keys(keys) -> None:
