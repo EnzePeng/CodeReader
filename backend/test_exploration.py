@@ -2,7 +2,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.evidence import Evidence
 from app.exploration import ExplorationRequest, ReadOnlyExplorer
 
 

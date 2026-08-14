@@ -1,5 +1,5 @@
-import unittest
 import asyncio
+import unittest
 
 
 class ContextPackerTest(unittest.TestCase):
@@ -22,7 +22,9 @@ class ContextPackerTest(unittest.TestCase):
     def test_priority_packing_respects_total_token_budget(self) -> None:
         from app.context_packer import ContextPacker
 
-        counter = lambda text: len(text.split())
+        def counter(text: str) -> int:
+            return len(text.split())
+
         high = self._evidence("high.py", "high evidence is concise", "definition", 1.0)
         low = self._evidence(
             "low.py", "low evidence has many words and should not displace exact definition",
@@ -45,7 +47,9 @@ class ContextPackerTest(unittest.TestCase):
     def test_oversized_item_is_omitted_but_smaller_item_can_fit(self) -> None:
         from app.context_packer import ContextPacker
 
-        counter = lambda text: len(text)
+        def counter(text: str) -> int:
+            return len(text)
+
         huge = self._evidence("huge.py", "x" * 500, "definition", 1.0)
         small = self._evidence("small.py", "ok", "text", 0.2)
         packed = ContextPacker(counter, 160, 20, 10, 10).pack([small, huge])

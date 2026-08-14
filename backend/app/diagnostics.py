@@ -4,7 +4,7 @@ from __future__ import annotations
 import statistics
 import threading
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Deque, Dict, Union
 
 

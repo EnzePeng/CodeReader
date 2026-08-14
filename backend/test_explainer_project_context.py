@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 from app import explainer
 
-
 SEGMENT = {
     "id": "s1",
     "kind": "function",

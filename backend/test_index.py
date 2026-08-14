@@ -21,8 +21,10 @@ ctx = project_index.related_context(idx, code, "app/api.py")
 print("---- context ----")
 print(ctx)
 assert "segment_file" in ctx and "segmenter.py" in ctx
-assert "ThinkFilter" in ctx
 assert "make_key" in ctx
+# 重构后的索引只注入能解析到真实定义的相关源码：项目内不存在的虚构
+# 符号（ThinkFilter）不应出现在上下文中。
+assert "ThinkFilter" not in ctx, ctx
 # 本段定义的 explain 不应被注入；且 app/api.py（正斜杠写法）应视同当前文件
 assert "api.py" not in ctx, ctx
 

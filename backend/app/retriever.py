@@ -4,11 +4,10 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .code_index import CodeIndex
 from .evidence import Evidence
-
 
 _RELATION_ORDER = {
     "definition": 0,

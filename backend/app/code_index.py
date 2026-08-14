@@ -17,8 +17,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
-
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 SCHEMA_VERSION = 1
 MAX_INDEX_FILE_BYTES = 2_000_000
@@ -225,7 +224,7 @@ class _PythonVisitor(ast.NodeVisitor):
         return qualified
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        qualified = self._add_symbol(node, node.name, "class")
+        self._add_symbol(node, node.name, "class")
         self.stack.append((node.name, "class"))
         self.generic_visit(node)
         self.stack.pop()
@@ -454,7 +453,6 @@ class CodeIndex:
             for dirname in sorted(dirnames):
                 if dirname in _HARD_SKIP_DIRS:
                     continue
-                rel_dir = (current / dirname).relative_to(root).as_posix()
                 # Do not prune ignored directories: a later ! rule may re-include children.
                 # Hard skips above protect the common very large generated directories.
                 kept_dirs.append(dirname)

@@ -9,7 +9,6 @@ from hmac import compare_digest
 from http.cookies import SimpleCookie
 from typing import Any, Awaitable, Callable, Dict, FrozenSet, Iterable, List, Tuple
 
-
 COOKIE_NAME = "codereader_session"
 
 

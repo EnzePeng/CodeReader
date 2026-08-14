@@ -6,7 +6,6 @@ from typing import Awaitable, Callable, List, Sequence
 
 from .evidence import Evidence
 
-
 _RELATION_PRIORITY = {
     "definition": 0,
     "reference": 1,

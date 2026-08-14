@@ -1,9 +1,6 @@
-import asyncio
 import json
 import unittest
 from unittest import mock
-
-import httpx
 
 from app import llm
 

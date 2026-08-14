@@ -20,15 +20,18 @@ from pydantic import BaseModel, Field
 
 from . import cache, explainer, llama_launcher, llm, project_index, segmenter
 from .citations import CitationFilter, EvidenceCatalog
-from .config import (APP_VERSION, data_dir, get_config, model_id,
-                     resolve_path, update_config_file)
+from .config import APP_VERSION, data_dir, get_config, model_id, resolve_path, update_config_file
 from .context_packer import ContextPacker
 from .diagnostics import diagnostics
 from .exploration import ExplorationRequest, ReadOnlyExplorer
 from .projects import registry as project_registry
-from .schemas import (ChatRequest, ExplainRequest, ProjectOpenRequest,
-                      ProjectOpenResponse, ProjectRelativePathRequest,
-                      StreamSequence)
+from .schemas import (
+    ChatRequest,
+    ExplainRequest,
+    ProjectOpenRequest,
+    ProjectOpenResponse,
+    StreamSequence,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

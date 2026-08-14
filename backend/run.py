@@ -8,7 +8,6 @@ import webbrowser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import uvicorn
-
 from app.config import get_config, validate_bind_host
 from app.main import create_app
 from app.security import SecuritySettings

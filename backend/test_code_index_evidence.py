@@ -1,7 +1,6 @@
 import os
 import sqlite3
 import tempfile
-import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -49,7 +48,7 @@ class CodeIndexEvidenceTest(unittest.TestCase):
         (ignored_dir / "keep.md").write_text("negation keeps this needle-keep\n", encoding="utf-8")
 
     def test_schema_coverage_ignore_rules_and_parse_error_search(self) -> None:
-        from app.code_index import CodeIndex, SCHEMA_VERSION
+        from app.code_index import SCHEMA_VERSION, CodeIndex
 
         self._write_fixture()
         index = CodeIndex(self.db)

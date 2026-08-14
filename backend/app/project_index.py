@@ -15,8 +15,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from .segmenter import SKIP_DIRS
-
 # The evidence-index slice is intentionally additive.  These imports make the new
 # persistent interfaces discoverable from the historical ``project_index`` module
 # while every existing function below retains its original shape and behavior.
@@ -24,6 +22,7 @@ from .code_index import CodeIndex, IndexStatus  # noqa: F401
 from .context_packer import ContextPacker  # noqa: F401
 from .evidence import Evidence  # noqa: F401
 from .retriever import Retriever  # noqa: F401
+from .segmenter import SKIP_DIRS
 
 MAX_FILES = 3000
 MAX_FILE_BYTES = 1_200_000

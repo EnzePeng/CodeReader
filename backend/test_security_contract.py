@@ -3,9 +3,9 @@
 These tests intentionally avoid the model service.  They exercise the public
 HTTP boundary and the filesystem capability that backs ``project_id``.
 """
+import json
 import tempfile
 import unittest
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -103,9 +103,9 @@ class PublicAPIContractTest(unittest.TestCase):
             raise unittest.SkipTest(f"FastAPI test dependencies unavailable: {exc}")
 
     def setUp(self) -> None:
-        from fastapi.testclient import TestClient
         from app.main import create_app
         from app.security import SecuritySettings
+        from fastapi.testclient import TestClient
 
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name) / "project"
@@ -204,8 +204,8 @@ class PublicAPIContractTest(unittest.TestCase):
         self.assertEqual(missing.json()["error"]["code"], "project_not_found")
 
     def test_sse_sequence_has_stable_envelope(self) -> None:
-        from pydantic import ValidationError
         from app.schemas import StreamSequence
+        from pydantic import ValidationError
 
         stream = StreamSequence(job_id="job-new", scope_id="main.py")
         first = stream.event("status", {"state": "queued"}).model_dump()

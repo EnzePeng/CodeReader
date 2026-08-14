@@ -1,7 +1,5 @@
 """思考模式开关 API 测试。"""
 import json
-import sys
-import time
 
 import httpx
 
