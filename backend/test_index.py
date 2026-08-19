@@ -6,8 +6,6 @@ from app import project_index
 root = str(Path(__file__).parent)
 idx = project_index.get_index(root)
 assert idx is not None
-print("files:", idx["files"], "symbols:", len(idx["symbols"]),
-      "build_ms:", idx["build_ms"])
 assert idx["files"] >= 5
 assert "segment_file" in idx["symbols"], sorted(idx["symbols"])[:30]
 
@@ -18,8 +16,6 @@ def explain():
     key = make_key("a", "b")
 """
 ctx = project_index.related_context(idx, code, "app/api.py")
-print("---- context ----")
-print(ctx)
 assert "segment_file" in ctx and "segmenter.py" in ctx
 assert "make_key" in ctx
 # 重构后的索引只注入能解析到真实定义的相关源码：项目内不存在的虚构
@@ -31,5 +27,3 @@ assert "api.py" not in ctx, ctx
 # 当前文件内定义的符号应被排除
 ctx2 = project_index.related_context(idx, "segment_file(x)", "app\\segmenter.py")
 assert "segment_file" not in ctx2, ctx2
-
-print("OK")
