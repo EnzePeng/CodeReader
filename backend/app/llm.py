@@ -176,7 +176,7 @@ class ModelCapabilities:
 
 
 class ModelBackend(Protocol):
-    async def stream(
+    def stream(
         self, messages: List[Dict[str, str]], max_tokens: int,
         temperature: Optional[float] = None,
     ) -> AsyncIterator[str]: ...

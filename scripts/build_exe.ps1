@@ -86,11 +86,14 @@ if (-not $SkipModel) {
 
 Copy-Item (Join-Path $root "README.md") (Join-Path $out "使用说明.md") -Force
 
-Get-ChildItem $out -Recurse -File | ForEach-Object {
-    $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName
-    $relative = $_.FullName.Substring($out.Length + 1)
-    "$($hash.Hash.ToLowerInvariant())  $relative"
-} | Set-Content -Encoding UTF8 (Join-Path $out "SHA256SUMS.txt")
+$checksumPath = Join-Path $out "SHA256SUMS.txt"
+Get-ChildItem $out -Recurse -File |
+    Where-Object { $_.FullName -ne $checksumPath } |
+    ForEach-Object {
+        $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName
+        $relative = $_.FullName.Substring($out.Length + 1)
+        "$($hash.Hash.ToLowerInvariant())  $relative"
+    } | Set-Content -Encoding UTF8 $checksumPath
 
 # 4. 汇总
 Write-Host "`n[4/4] 完成！" -ForegroundColor Green

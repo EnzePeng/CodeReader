@@ -71,7 +71,8 @@ class CodeIndexEvidenceTest(unittest.TestCase):
         hits = index.search_text(self.root, "needle_broken", limit=10)
         self.assertTrue(any(hit["path"] == "broken.py" for hit in hits), hits)
 
-        with sqlite3.connect(self.db) as conn:
+        conn = sqlite3.connect(self.db)
+        try:
             tables = {row[0] for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
             )}
@@ -80,6 +81,8 @@ class CodeIndexEvidenceTest(unittest.TestCase):
                 "text_chunks", "text_chunks_fts",
             ):
                 self.assertIn(table, tables)
+        finally:
+            conn.close()
 
     def test_mtime_size_screen_hash_confirmation_update_and_delete(self) -> None:
         from app.code_index import CodeIndex

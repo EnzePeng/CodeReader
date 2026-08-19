@@ -205,10 +205,14 @@ class _PythonVisitor(ast.NodeVisitor):
     def _add_symbol(self, node: ast.AST, name: str, kind: str) -> str:
         qualified = ".".join([item[0] for item in self.stack] + [name])
         start = _node_start(node)
-        end = int(getattr(node, "end_lineno", None) or getattr(node, "lineno", start))
+        end_lineno = getattr(node, "end_lineno", None)
+        end = end_lineno if isinstance(end_lineno, int) else start
         signature = self.lines[getattr(node, "lineno", start) - 1].strip() if self.lines else name
         try:
-            doc = (ast.get_docstring(node) or "").strip().splitlines()[0][:240]
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                doc = (ast.get_docstring(node) or "").strip().splitlines()[0][:240]
+            else:
+                doc = ""
         except (TypeError, IndexError):
             doc = ""
         self.symbols.append({
@@ -260,7 +264,7 @@ class _PythonVisitor(ast.NodeVisitor):
                 "callee_name": target_name,
                 "receiver": ".".join(parts[:-1]),
                 "start_line": int(getattr(node, "lineno", 1)),
-                "end_line": int(getattr(node, "end_lineno", None) or getattr(node, "lineno", 1)),
+                "end_line": node.end_lineno or node.lineno,
             })
         self.generic_visit(node)
 
@@ -442,7 +446,8 @@ class CodeIndex:
             "INSERT INTO projects(root,last_indexed,schema_version) VALUES (?,?,?)",
             (str(root), 0.0, SCHEMA_VERSION),
         )
-        return int(cur.lastrowid)
+        assert cur.lastrowid is not None
+        return cur.lastrowid
 
     @staticmethod
     def _iter_files(root: Path) -> Iterator[Tuple[Path, str, str]]:
@@ -538,7 +543,8 @@ class CodeIndex:
                         (project_id, rel, language, stat.st_size, stat.st_mtime_ns,
                          source_hash, parse_error, now, len(source.splitlines())),
                     )
-                    file_id = int(cur.lastrowid)
+                    assert cur.lastrowid is not None
+                    file_id = cur.lastrowid
                     added += 1
                 symbol_ids: Dict[str, int] = {}
                 for symbol in symbols:
@@ -549,7 +555,8 @@ class CodeIndex:
                          symbol["start_line"], symbol["end_line"], symbol["signature"],
                          symbol["doc"], symbol["parent"]),
                     )
-                    symbol_ids[symbol["qualified_name"]] = int(cur.lastrowid)
+                    assert cur.lastrowid is not None
+                    symbol_ids[symbol["qualified_name"]] = cur.lastrowid
                 for call in calls:
                     conn.execute(
                         """INSERT INTO calls(file_id,caller_symbol_id,target_symbol_id,callee_name,

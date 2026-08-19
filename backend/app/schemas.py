@@ -1,7 +1,7 @@
 """Public API and streaming-event schemas."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Type, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -127,7 +127,7 @@ class ErrorPayload(BaseModel):
     details: Optional[Dict[str, Any]] = None
 
 
-_PAYLOAD_MODELS = {
+_PAYLOAD_MODELS: Dict[StreamType, Type[BaseModel]] = {
     "evidence": EvidencePayload,
     "delta": DeltaPayload,
     "status": StatusPayload,

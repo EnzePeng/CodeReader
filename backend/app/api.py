@@ -31,6 +31,7 @@ from .schemas import (
     ProjectOpenRequest,
     ProjectOpenResponse,
     StreamSequence,
+    StreamType,
 )
 
 router = APIRouter()
@@ -273,7 +274,7 @@ def sse(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def stream_sse(sequence: StreamSequence, event_type: str,
+def stream_sse(sequence: StreamSequence, event_type: StreamType,
                payload: Dict[str, Any]) -> str:
     envelope = sequence.event(event_type, payload).model_dump()
     # The SSE event name and envelope.type intentionally match.  Clients use

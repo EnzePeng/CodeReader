@@ -13,7 +13,7 @@ import re
 import textwrap
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 # The evidence-index slice is intentionally additive.  These imports make the new
 # persistent interfaces discoverable from the historical ``project_index`` module
@@ -157,7 +157,7 @@ def _extract_file(path: Path, rel: str) -> Optional[Dict[str, Any]]:
                     "name": alias.name,
                 }
 
-    def make_entry(node: ast.AST, kind: str,
+    def make_entry(node: Union[ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef], kind: str,
                    parent: Optional[str] = None) -> Dict[str, Any]:
         end = getattr(node, "end_lineno", node.lineno) or node.lineno
         sig = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else node.name

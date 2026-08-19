@@ -8,7 +8,7 @@
 import ast
 import hashlib
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # 超过该行数的类会被拆成 类头 + 各方法
 CLASS_SPLIT_LINES = 60
@@ -53,14 +53,17 @@ def _seg(kind: str, title: str, start: int, end: int) -> Dict[str, Any]:
     return {"kind": kind, "title": title, "start_line": start, "end_line": end}
 
 
-def _node_start(node: ast.AST) -> int:
+def _node_start(node: ast.stmt) -> int:
     """含装饰器的起始行。"""
     decorators = getattr(node, "decorator_list", None) or []
-    linenos = [d.lineno for d in decorators] + [node.lineno]
+    linenos = [getattr(decorator, "lineno", node.lineno) for decorator in decorators]
+    linenos.append(node.lineno)
     return min(linenos)
 
 
-def _split_long_function(seg: Dict[str, Any], node: ast.AST) -> List[Dict[str, Any]]:
+def _split_long_function(
+    seg: Dict[str, Any], node: Union[ast.FunctionDef, ast.AsyncFunctionDef]
+) -> List[Dict[str, Any]]:
     """超长函数按函数体顶层语句边界拆分。"""
     total = seg["end_line"] - seg["start_line"] + 1
     if total <= FUNC_SPLIT_LINES or not getattr(node, "body", None):
@@ -133,21 +136,28 @@ def _is_main_guard(node: ast.AST) -> bool:
 def _outline_from_ast(tree: ast.Module) -> List[Dict[str, Any]]:
     outline: List[Dict[str, Any]] = []
 
-    def visit(nodes, dest, prefix=""):
+    def visit(
+        nodes: List[ast.stmt], dest: List[Dict[str, Any]], prefix: str = ""
+    ) -> None:
         for n in nodes:
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                item = {"kind": "function" if not prefix else "method",
-                        "name": f"{n.name}()",
-                        "start_line": _node_start(n),
-                        "end_line": n.end_lineno or n.lineno,
-                        "children": []}
+                item: Dict[str, Any] = {
+                    "kind": "function" if not prefix else "method",
+                    "name": f"{n.name}()",
+                    "start_line": _node_start(n),
+                    "end_line": n.end_lineno or n.lineno,
+                    "children": [],
+                }
                 dest.append(item)
                 visit(n.body, item["children"], prefix + n.name + ".")
             elif isinstance(n, ast.ClassDef):
-                item = {"kind": "class", "name": n.name,
-                        "start_line": _node_start(n),
-                        "end_line": n.end_lineno or n.lineno,
-                        "children": []}
+                item = {
+                    "kind": "class",
+                    "name": n.name,
+                    "start_line": _node_start(n),
+                    "end_line": n.end_lineno or n.lineno,
+                    "children": [],
+                }
                 dest.append(item)
                 visit(n.body, item["children"], prefix + n.name + ".")
 
@@ -168,20 +178,27 @@ def segment_python_ast(source: str) -> Optional[Dict[str, Any]]:
     # 模块 docstring
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
             and isinstance(body[0].value.value, str):
-        node = body[0]
-        segments.append(_seg("docstring", "模块说明", node.lineno, node.end_lineno or node.lineno))
+        module_docstring = body[0]
+        segments.append(
+            _seg(
+                "docstring",
+                "模块说明",
+                module_docstring.lineno,
+                module_docstring.end_lineno or module_docstring.lineno,
+            )
+        )
         i = 1
 
-    def flush_group(group, kind, title):
+    def flush_group(group: List[Tuple[int, int]], kind: str, title: str) -> None:
         if group:
             segments.append(_seg(kind, title, group[0][0], group[-1][1]))
             group.clear()
 
-    import_group: List[Any] = []
-    global_group: List[Any] = []
-    code_group: List[Any] = []
+    import_group: List[Tuple[int, int]] = []
+    global_group: List[Tuple[int, int]] = []
+    code_group: List[Tuple[int, int]] = []
 
-    def flush_all():
+    def flush_all() -> None:
         flush_group(import_group, "imports", "导入依赖")
         flush_group(global_group, "globals", "全局定义")
         flush_group(code_group, "code", "模块级代码")
