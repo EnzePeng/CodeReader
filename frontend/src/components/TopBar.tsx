@@ -208,6 +208,7 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
       </div>
       <div className="proj-open">
         <input
+          id="project-path-input"
           value={input}
           placeholder="输入项目目录，如 D:\work\my-project"
           onChange={e => setInput(e.target.value)}

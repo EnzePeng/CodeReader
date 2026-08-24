@@ -22,11 +22,13 @@ const MODE_NAME: Record<ExplainMode, string> = { simple: '简单版', detailed: 
 interface Props {
   state: SegState
   active: boolean
+  collapsed: boolean
   explaining: boolean
   ready: boolean
   /** 是否处于「手动选块」范围 */
   manual: boolean
   onClick: () => void
+  onToggleCollapsed: () => void
   evidence?: Evidence[]
   onOpenEvidence?: (evidence: Evidence) => void
   /** 以指定模式解读本段；force=true 忽略缓存重新生成 */
@@ -34,7 +36,7 @@ interface Props {
 }
 
 function SegmentCard({
-  state, active, explaining, ready, manual, onClick, onExplain,
+  state, active, collapsed, explaining, ready, manual, onClick, onToggleCollapsed, onExplain,
   evidence = [], onOpenEvidence,
 }: Props) {
   const { meta, text, status, cached, mode } = state
@@ -61,17 +63,47 @@ function SegmentCard({
   const showModeButtons = manual && !text && status !== 'streaming'
   // 自动模式下排队等待的段：骨架屏占位 + 整卡弱化
   const queued = !showModeButtons && !text && status !== 'streaming' && explaining
+  // 当前定位段与流式生成段必须保持展开，避免隐藏用户正在关注的内容。
+  const isCollapsed = collapsed && !active && status !== 'streaming'
+  const bodyId = `card-body-${meta.id}`
+
+  const collapsedStatus = queued
+    ? '排队中'
+    : status === 'done'
+      ? '已完成'
+      : status === 'cancelled'
+        ? '已停止'
+        : status === 'error'
+          ? '生成失败'
+          : '待解读'
 
   const cardCls = [
     'card', 'seg-card',
     active ? 'active' : '',
     status === 'streaming' ? 'streaming' : '',
     queued ? 'queued' : '',
+    isCollapsed ? 'seg-card-collapsed' : '',
   ].filter(Boolean).join(' ')
 
   return (
-    <article id={`card-${meta.id}`} className={cardCls} aria-current={active ? 'location' : undefined}>
+    <article id={`card-${meta.id}`} className={cardCls}
+      aria-current={active ? 'location' : undefined}
+      aria-busy={status === 'streaming' || queued ? true : undefined}>
       <div className="card-head">
+        <button
+          type="button"
+          className="icon-btn card-disclosure"
+          aria-expanded={!isCollapsed}
+          aria-controls={bodyId}
+          aria-label={`${isCollapsed ? '展开' : '收起'} ${meta.title} 的解读`}
+          title={active || status === 'streaming' ? '当前活动段会保持展开' : `${isCollapsed ? '展开' : '收起'}本段解读`}
+          disabled={active || status === 'streaming'}
+          onClick={e => { e.stopPropagation(); onToggleCollapsed() }}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="m5.5 3.5 4.5 4.5-4.5 4.5" />
+          </svg>
+        </button>
         <button className="card-jump" onClick={onClick}
           aria-label={`在代码中定位 ${meta.title}，第 ${meta.start_line} 到 ${meta.end_line} 行`}>
           <span className={`chip chip-${meta.kind}`}>{KIND_LABEL[meta.kind] || meta.kind}</span>
@@ -85,7 +117,16 @@ function SegmentCard({
             </span>
           )}
           {status === 'done' && cached && <span className="chip chip-cache" title="来自本地缓存">缓存</span>}
-          {status === 'streaming' && <span className="spinner" />}
+          {isCollapsed && (
+            <span className={`seg-card-collapsed-status status-${status}`}>
+              {collapsedStatus}
+            </span>
+          )}
+          {status === 'streaming' && (
+            <span className="seg-card-progress" role="status" aria-label="正在生成本段解读">
+              <span className="spinner" aria-hidden="true" />
+            </span>
+          )}
           {status === 'done' && (
             <>
               <button className="icon-btn" title="复制解读" onClick={copy}>⧉</button>
@@ -101,7 +142,8 @@ function SegmentCard({
           )}
         </span>
       </div>
-      <div className="card-body md">
+      {!isCollapsed && (
+      <div id={bodyId} className="card-body md seg-card-body">
         {showModeButtons ? (
           <div className="seg-mode-actions">
             <button className="btn-sm" disabled={!ready || explaining} onClick={explainAs('simple')}
@@ -144,6 +186,7 @@ function SegmentCard({
           </div>
         )}
       </div>
+      )}
     </article>
   )
 }

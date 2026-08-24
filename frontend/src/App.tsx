@@ -6,6 +6,7 @@ import type { CodePaneApi } from './components/CodePane'
 import ExplainPanel from './components/ExplainPanel'
 import ChatDrawer from './components/ChatDrawer'
 import QuickOpen, { QuickOpenMode } from './components/QuickOpen'
+import SelectionActions from './components/SelectionActions'
 import { createDeltaBatch } from './deltaBatch'
 import { normalizeScope, resolveEventScope } from './scope'
 import {
@@ -23,10 +24,24 @@ import {
 
 type ForceArg = 'none' | 'all' | string[]
 type ExplainStatus = 'idle' | 'streaming' | 'done' | 'cancelled' | 'error'
+type WorkspaceMode = 'code' | 'split' | 'explain'
 
 const MODE_KEY = 'cr_explain_mode'
 const SCOPE_KEY = 'cr_scope_mode'
+const SIDEBAR_KEY = 'cr_sidebar_collapsed'
+const WORKSPACE_MODE_KEY = 'cr_workspace_mode'
+const PANEL_RATIO_KEY = 'cr_panel_ratio'
 const CodePane = lazy(() => import('./components/CodePane'))
+
+function storedPanelRatio(): number {
+  const value = Number(localStorage.getItem(PANEL_RATIO_KEY))
+  return Number.isFinite(value) ? Math.min(0.6, Math.max(0.25, value)) : 0.42
+}
+
+function storedWorkspaceMode(): WorkspaceMode {
+  const value = localStorage.getItem(WORKSPACE_MODE_KEY)
+  return value === 'code' || value === 'explain' ? value : 'split'
+}
 
 function messageOf(error: unknown): string {
   return String((error as Error)?.message || error || '发生未知错误')
@@ -100,7 +115,11 @@ export default function App() {
   const [activeSeg, setActiveSeg] = useState<string | null>(null)
   const [selection, setSelection] = useState<LineRange | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
-  const [panelRatio, setPanelRatio] = useState(0.42)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem(SIDEBAR_KEY) === 'true')
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(storedWorkspaceMode)
+  const [panelRatio, setPanelRatio] = useState(storedPanelRatio)
+  const [toast, setToast] = useState('')
 
   const [quickOpen, setQuickOpen] = useState<{
     open: boolean
@@ -142,6 +161,24 @@ export default function App() {
   const structure = structureState.data
   const explaining = explainJob.phase === 'running'
   const ready = !!health?.llama.ready
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_KEY, String(sidebarCollapsed))
+      localStorage.setItem(WORKSPACE_MODE_KEY, workspaceMode)
+      localStorage.setItem(PANEL_RATIO_KEY, String(panelRatio))
+    } catch { /* 布局偏好不是关键数据，存储失败时继续使用当前会话状态。 */ }
+  }, [sidebarCollapsed, workspaceMode, panelRatio])
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(''), 2200)
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
+  const showToast = useCallback((message: string) => {
+    setToast(message)
+  }, [])
 
   // ---------- 模型状态轮询 ----------
   const healthTimer = useRef<number | undefined>(undefined)
@@ -626,14 +663,18 @@ export default function App() {
       setGlobalError(messageOf(error)); return
     }
     const range = { start: Math.max(1, evidence.start_line), end: Math.max(evidence.start_line, evidence.end_line) }
+    const revealCode = () => {
+      setMobileView('code')
+      if (window.innerWidth >= 900) setWorkspaceMode('split')
+    }
     if (fileRef.current?.relative_path === path) {
       codeApi.current?.revealRange(range.start, range.end)
       if (recordHistory) pushHistory({ ...evidence, path, ...{ start_line: range.start, end_line: range.end } })
-      setMobileView('code')
+      revealCode()
       return
     }
     const opened = await openFile(path, { reveal: range, recordHistory })
-    if (opened) setMobileView('code')
+    if (opened) revealCode()
   }, [openFile, pushHistory])
 
   const navigateHistory = useCallback((direction: -1 | 1) => {
@@ -707,6 +748,16 @@ export default function App() {
     setMobileView('code')
   }, [handleEditorLineClick])
 
+  const changeWorkspaceMode = useCallback((mode: WorkspaceMode) => {
+    setWorkspaceMode(mode)
+    const labels: Record<WorkspaceMode, string> = {
+      code: '已切换到代码专注视图',
+      split: '已切换到双栏视图',
+      explain: '已切换到解读专注视图',
+    }
+    showToast(labels[mode])
+  }, [showToast])
+
   // ---------- 快捷键 ----------
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -717,6 +768,16 @@ export default function App() {
       } else if (modifier && event.shiftKey && event.key.toLowerCase() === 'o') {
         event.preventDefault()
         if (projectRef.current) setQuickOpen({ open: true, mode: 'symbol' })
+      } else if (modifier && !event.shiftKey && event.key.toLowerCase() === 'b') {
+        event.preventDefault()
+        if (window.innerWidth >= 1100) setSidebarCollapsed(value => !value)
+        else setSidebarOpen(value => !value)
+      } else if (modifier && event.altKey && ['1', '2', '3'].includes(event.key)) {
+        event.preventDefault()
+        if (fileRef.current) {
+          const modes: WorkspaceMode[] = ['code', 'split', 'explain']
+          changeWorkspaceMode(modes[Number(event.key) - 1])
+        }
       } else if (event.altKey && event.key === 'ArrowLeft') {
         event.preventDefault(); navigateHistory(-1)
       } else if (event.altKey && event.key === 'ArrowRight') {
@@ -728,7 +789,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [navigateHistory, requestNavigation])
+  }, [changeWorkspaceMode, navigateHistory, requestNavigation])
 
   // ---------- 面板拖拽与键盘调整 ----------
   const onDragDivider = useCallback((event: ReactMouseEvent) => {
@@ -754,10 +815,11 @@ export default function App() {
 
   const historyBack = historyIndexRef.current > 0
   const historyForward = historyIndexRef.current >= 0 && historyIndexRef.current < historyRef.current.length - 1
+  const sidebarExpanded = viewport === 'wide' ? !sidebarCollapsed : sidebarOpen
   void historyVersion // state changes intentionally trigger the derived disabled states above.
 
   return (
-    <div className={`app viewport-${viewport}`}>
+    <div className={`app viewport-${viewport} focus-${workspaceMode}${sidebarCollapsed ? ' nav-collapsed' : ''}`}>
       <TopBar
         health={health}
         projectRoot={project?.root ?? ''}
@@ -777,20 +839,38 @@ export default function App() {
       </div>
 
       <div className="workspace-toolbar">
-        {viewport !== 'wide' && (
-          <button className="btn-sm" onClick={() => setSidebarOpen(value => !value)}
-            aria-expanded={sidebarOpen} aria-controls="project-sidebar">
-            {sidebarOpen ? '收起导航' : '文件与大纲'}
-          </button>
-        )}
+        <button className="btn-sm nav-toggle"
+          onClick={() => viewport === 'wide'
+            ? setSidebarCollapsed(value => !value)
+            : setSidebarOpen(value => !value)}
+          aria-expanded={sidebarExpanded} aria-controls="project-sidebar"
+          title="切换项目导航（Ctrl+B）">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <rect x="2.5" y="3" width="15" height="14" rx="2" />
+            <path d="M7 3v14" />
+          </svg>
+          <span>{sidebarExpanded ? '收起导航' : '展开导航'}</span>
+          <kbd>Ctrl B</kbd>
+        </button>
         <div className="history-controls" aria-label="代码导航历史">
           <button className="icon-btn" disabled={!historyBack} onClick={() => navigateHistory(-1)}
-            title="后退（Alt+←）" aria-label="后退">←</button>
+            title="后退（Alt+←）" aria-label="后退">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m11.5 5-5 5 5 5" /></svg>
+          </button>
           <button className="icon-btn" disabled={!historyForward} onClick={() => navigateHistory(1)}
-            title="前进（Alt+→）" aria-label="前进">→</button>
+            title="前进（Alt+→）" aria-label="前进">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8.5 5 5 5-5 5" /></svg>
+          </button>
         </div>
+        {fileInfo && (
+          <div className="workspace-breadcrumb" title={fileInfo.relative_path}>
+            <span>{project?.name ?? '项目'}</span><i aria-hidden="true">/</i>
+            <strong>{fileInfo.relative_path}</strong>
+          </div>
+        )}
+        <div className="toolbar-spacer" />
         {project && (
-          <>
+          <div className="workspace-commands">
             <button className="btn-sm command-button" onClick={() => setQuickOpen({ open: true, mode: 'file' })}>
               快速打开 <kbd>Ctrl P</kbd>
             </button>
@@ -805,7 +885,21 @@ export default function App() {
                   ? `已索引 ${project.index_status.files_indexed ?? 0} 个文件`
                   : '索引未就绪'}
             </span>
-          </>
+          </div>
+        )}
+        {viewport !== 'narrow' && (
+          <div className="focus-switcher" role="group" aria-label="工作区视图">
+            {([
+              ['code', '代码', 'Ctrl+Alt+1'],
+              ['split', '双栏', 'Ctrl+Alt+2'],
+              ['explain', '解读', 'Ctrl+Alt+3'],
+            ] as const).map(([mode, label, shortcut]) => (
+              <button key={mode} aria-pressed={workspaceMode === mode}
+                className={workspaceMode === mode ? 'active' : ''}
+                disabled={!fileInfo} title={shortcut}
+                onClick={() => changeWorkspaceMode(mode)}>{label}</button>
+            ))}
+          </div>
         )}
         {viewport === 'narrow' && (
           <div className="mobile-view-tabs" role="tablist" aria-label="阅读视图">
@@ -817,12 +911,13 @@ export default function App() {
         )}
       </div>
 
-      <div className={`main${sidebarOpen ? ' sidebar-open' : ''}`}>
+      <div className={`main mode-${workspaceMode}${sidebarOpen ? ' sidebar-open' : ''}${sidebarCollapsed ? ' sidebar-collapsed' : ''}${!fileInfo ? ' no-file' : ''}`}>
         {sidebarOpen && viewport !== 'wide' && (
           <button className="sidebar-backdrop" onClick={() => setSidebarOpen(false)}
             aria-label="关闭项目导航" />
         )}
-        <aside id="project-sidebar" className="sidebar" aria-label="项目导航">
+        <aside id="project-sidebar" className="sidebar" aria-label="项目导航"
+          aria-hidden={viewport === 'wide' && sidebarCollapsed}>
           <div className="side-tabs" role="tablist" aria-label="项目导航类型">
             <button role="tab" aria-selected={sideTab === 'files'}
               className={sideTab === 'files' ? 'active' : ''} onClick={() => setSideTab('files')}>文件</button>
@@ -833,7 +928,11 @@ export default function App() {
             {sideTab === 'files' ? (
               project
                 ? <FileTree projectId={project.project_id} rootLabel={project.root}
-                    currentFile={fileInfo?.relative_path ?? null} onOpenFile={path => { void openFile(path) }} />
+                    currentFile={fileInfo?.relative_path ?? null}
+                    onOpenFile={path => {
+                      if (viewport !== 'narrow') setWorkspaceMode('split')
+                      void openFile(path)
+                    }} />
                 : <div className="side-empty">请先在顶部打开一个项目目录</div>
             ) : (
               structure
@@ -860,24 +959,56 @@ export default function App() {
                 />
               </Suspense>
               {fileState.phase === 'loading' && <div className="pane-loading" role="status">正在打开文件…</div>}
+              <SelectionActions
+                selection={selection}
+                relativePath={fileInfo.relative_path}
+                onAsk={() => {
+                  setChatOpen(true)
+                  showToast('已将选区加入追问上下文')
+                }}
+                onCopyCode={async () => {
+                  const text = codeApi.current?.getSelectedText() ?? ''
+                  if (!text) throw new Error('没有可复制的代码')
+                  if (!navigator.clipboard) throw new Error('当前环境不支持复制')
+                  await navigator.clipboard.writeText(text)
+                }}
+                onDismiss={() => codeApi.current?.clearSelection()}
+              />
             </>
           ) : (
             <div className="welcome">
+              <div className="welcome-kicker">LOCAL CODE INTELLIGENCE</div>
               <div className="welcome-art" aria-hidden="true"><i /><i /><i /></div>
-              <h2>CodeReader</h2>
-              <p>纯离线 · 本地大模型代码解读</p>
-              <ol>
-                <li>顶部输入或浏览选择项目目录</li>
-                <li>用文件树或 Ctrl+P 打开代码文件</li>
-                <li>在代码与中文解读之间联动阅读</li>
+              <h1>{project ? `从 ${project.name} 开始阅读` : '把陌生代码变成可追溯的解释'}</h1>
+              <p className="welcome-lead">
+                {project
+                  ? '项目已就绪。打开一个文件，沿着代码、结构与证据逐层建立理解。'
+                  : 'CodeReader 在本机连接源代码、结构大纲与中文解读，让每个结论都能回到具体行。'}
+              </p>
+              <div className="welcome-actions">
+                {project ? (
+                  <button className="btn-primary" onClick={() => setQuickOpen({ open: true, mode: 'file' })}>
+                    快速打开文件 <kbd>Ctrl P</kbd>
+                  </button>
+                ) : (
+                  <button className="btn-primary"
+                    onClick={() => document.querySelector<HTMLInputElement>('#project-path-input')?.focus()}>
+                    选择项目目录
+                  </button>
+                )}
+                <span>代码内容与解读缓存均保留在本机</span>
+              </div>
+              <ol className="welcome-guide">
+                <li><strong>01</strong><span>打开项目与文件</span></li>
+                <li><strong>02</strong><span>选择代码或生成解读</span></li>
+                <li><strong>03</strong><span>追问并回到证据行</span></li>
               </ol>
-              <p className="dim">解读结果会缓存在本地；代码内容不出本机。</p>
               {projectState.phase === 'loading' && <p role="status">正在打开项目…</p>}
             </div>
           )}
         </section>
 
-        {viewport !== 'narrow' && (
+        {viewport !== 'narrow' && fileInfo && workspaceMode === 'split' && (
           <div className="divider" onMouseDown={onDragDivider} role="separator" tabIndex={0}
             aria-label="调整代码与解读区域宽度" aria-orientation="vertical"
             aria-valuemin={25} aria-valuemax={60} aria-valuenow={Math.round(panelRatio * 100)}
@@ -892,7 +1023,9 @@ export default function App() {
         )}
 
         <section className={`explain-area${viewport === 'narrow' && mobileView !== 'explain' ? ' mobile-hidden' : ''}`}
-          style={viewport === 'narrow' ? undefined : { width: `${panelRatio * 100}%` }} aria-label="代码解读">
+          style={viewport === 'narrow' || workspaceMode !== 'split'
+            ? undefined
+            : { width: `${panelRatio * 100}%` }} aria-label="代码解读">
           <ExplainPanel
             fileInfo={fileInfo}
             projectId={project?.project_id ?? ''}
@@ -949,6 +1082,8 @@ export default function App() {
         onClose={() => setQuickOpen(previous => ({ ...previous, open: false }))}
         onSelect={evidence => { void openEvidence(evidence) }}
       />
+
+      {toast && <div className="toast" role="status" aria-live="polite">{toast}</div>}
     </div>
   )
 }

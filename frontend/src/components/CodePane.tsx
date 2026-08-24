@@ -19,6 +19,8 @@ registerCodeReaderTheme()
 export interface CodePaneApi {
   revealRange: (startLine: number, endLine: number) => void
   getPosition: () => { line: number; column: number }
+  getSelectedText: () => string
+  clearSelection: () => void
 }
 
 interface Props {
@@ -53,6 +55,26 @@ export default function CodePane({
       getPosition: () => {
         const position = editor.getPosition()
         return { line: position?.lineNumber ?? 1, column: position?.column ?? 1 }
+      },
+      getSelectedText: () => {
+        const model = editor.getModel()
+        const selection = editor.getSelection()
+        if (!model || !selection || selection.isEmpty()) return ''
+        return model.getValueInRange(selection)
+      },
+      clearSelection: () => {
+        const selection = editor.getSelection()
+        const position = selection?.getPosition() ?? editor.getPosition()
+        if (position) {
+          editor.setSelection(new monaco.Selection(
+            position.lineNumber,
+            position.column,
+            position.lineNumber,
+            position.column,
+          ))
+        }
+        // Monaco 将程序化变更标记为 api，监听器会忽略它，因此在这里同步 React 状态。
+        cbRef.current.onSelection(null)
       },
     }
     editor.onDidChangeCursorSelection(ev => {

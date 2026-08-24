@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Evidence, ExplainMode, FileInfo, ScopeMode, SegState, Structure } from '../types'
@@ -49,6 +50,31 @@ export default function ExplainPanel(props: Props) {
     onOverview, onStop, onOpenEvidence,
   } = props
 
+  const fileKey = fileInfo ? `${projectId}:${fileInfo.relative_path}` : ''
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set())
+
+  // 折叠状态只属于当前文件；切换文件后不沿用同名分段的状态。
+  useEffect(() => {
+    setCollapsedIds(new Set())
+  }, [fileKey])
+
+  // 当前定位段和所有流式段始终自动展开。
+  useEffect(() => {
+    setCollapsedIds(previous => {
+      const next = new Set(previous)
+      let changed = false
+
+      if (activeSeg) changed = next.delete(activeSeg) || changed
+      segOrder.forEach(id => {
+        if (segStates[id]?.status === 'streaming') {
+          changed = next.delete(id) || changed
+        }
+      })
+
+      return changed ? next : previous
+    })
+  }, [activeSeg, segOrder, segStates])
+
   if (!fileInfo || !structure) {
     return (
       <div className="explain-panel">
@@ -62,6 +88,26 @@ export default function ExplainPanel(props: Props) {
   const doneCount = segOrder.filter(id => segStates[id]?.status === 'done').length
   const total = segOrder.length
   const manual = scopeMode === 'manual'
+  const collapsibleIds = segOrder.filter(id => (
+    Boolean(segStates[id])
+    && id !== activeSeg
+    && segStates[id]?.status !== 'streaming'
+  ))
+  const canCollapseAny = collapsibleIds.some(id => !collapsedIds.has(id))
+  const canExpandAny = segOrder.some(id => collapsedIds.has(id))
+
+  const toggleCollapsed = (id: string) => {
+    if (id === activeSeg || segStates[id]?.status === 'streaming') return
+    setCollapsedIds(previous => {
+      const next = new Set(previous)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const collapseAll = () => setCollapsedIds(new Set(collapsibleIds))
+  const expandAll = () => setCollapsedIds(new Set())
 
   return (
     <div className="explain-panel">
@@ -98,6 +144,16 @@ export default function ExplainPanel(props: Props) {
               onClick={() => onScopeChange('manual')}
               title="只解读你在卡片上点选的段，可为每段单独选简单/逐行"
             >手动选块</button>
+          </div>
+          <div className="seg-ctrl seg-collapse-ctrl" aria-label="分段解读折叠操作">
+            <button type="button" onClick={collapseAll} disabled={!canCollapseAny}
+              title="收起除当前活动段和生成中段落之外的全部分段">
+              收起全部
+            </button>
+            <button type="button" onClick={expandAll} disabled={!canExpandAny}
+              title="展开全部分段">
+              展开全部
+            </button>
           </div>
           {explaining ? (
             <button className="btn-sm warn" onClick={onStop}>停止</button>
@@ -194,12 +250,14 @@ export default function ExplainPanel(props: Props) {
               key={id}
               state={s}
               active={activeSeg === id}
+              collapsed={collapsedIds.has(id)}
               explaining={explaining}
               ready={ready}
               manual={manual}
               evidence={evidenceByScope[id] ?? []}
               onOpenEvidence={onOpenEvidence}
               onClick={() => onCardClick(id)}
+              onToggleCollapsed={() => toggleCollapsed(id)}
               onExplain={(mode, force) => onExplainSeg(id, mode, force)}
             />
           )
