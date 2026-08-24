@@ -926,6 +926,13 @@ kbd, .shortcut-hint {
 }
 .chat-status.err { color: #F5A3AB; background: var(--danger-soft); }
 .chat-bubble .evidence-list { display: flex; }
+.chat-warning {
+  margin-top: 8px; padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: var(--radius-sm); color: var(--text-secondary);
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  font-size: var(--fs-ui-sm);
+}
 
 /* ===== 快速打开 / 转到符号 ===== */
 .quick-open-mask { align-items: flex-start; padding-top: min(16vh, 140px); }

@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,17 @@ from app.exploration import ExplorationRequest, ReadOnlyExplorer
 
 
 class _FakeRetriever:
+    class _Index:
+        @staticmethod
+        def project_revision(_root):
+            return 7
+
+        @staticmethod
+        def file_record(_root, _path):
+            return {"language": "python"}
+
+    index = _Index()
+
     def definitions(self, symbol, current_file=None, limit=8):
         return [symbol]
 
@@ -43,11 +55,36 @@ class ReadOnlyExplorerTests(unittest.TestCase):
                 explorer.run([ExplorationRequest(
                     "open_code_span", {"path": "../outside.py", "start_line": 1, "end_line": 1}
                 )])
+            with self.assertRaisesRegex(ValueError, "project"):
+                explorer.run([ExplorationRequest(
+                    "open_code_span",
+                    {"path": str((root / "safe.py").resolve()), "start_line": 1, "end_line": 1},
+                )])
+            with self.assertRaisesRegex(ValueError, "200"):
+                explorer.run([ExplorationRequest(
+                    "open_code_span", {"path": "safe.py", "start_line": 1, "end_line": 201}
+                )])
+
+            outside = root.parent / "linked-outside.py"
+            outside.write_text("secret\n", encoding="utf-8")
+            link = root / "link.py"
+            try:
+                os.symlink(outside, link)
+            except OSError:
+                pass  # Windows may require Developer Mode for symlink creation.
+            else:
+                with self.assertRaisesRegex(ValueError, "project"):
+                    explorer.run([ExplorationRequest(
+                        "open_code_span", {"path": "link.py", "start_line": 1, "end_line": 1}
+                    )])
 
     def test_only_allowlisted_search_tools_are_exposed(self) -> None:
         self.assertEqual(
             set(ReadOnlyExplorer.ALLOWED_TOOLS),
-            {"search_symbols", "find_definitions", "find_references", "search_text", "open_code_span"},
+            {
+                "list_files", "search_symbols", "resolve_symbol", "find_references",
+                "trace_calls", "search_text", "open_code_span",
+            },
         )
 
 

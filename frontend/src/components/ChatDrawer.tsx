@@ -55,9 +55,9 @@ function clampPos(x: number, y: number, w: number, h: number): Pos {
 }
 
 /* 单条消息气泡。memo 化：拖拽/缩放引起的高频重渲染不必重新解析 Markdown */
-const Bubble = memo(function Bubble({ role, content, showCaret, evidence, onOpenEvidence }: {
+const Bubble = memo(function Bubble({ role, content, showCaret, evidence, warnings, onOpenEvidence }: {
   role: ChatMsg['role']; content: string; showCaret: boolean
-  evidence?: Evidence[]; onOpenEvidence: (evidence: Evidence) => void
+  evidence?: Evidence[]; warnings?: string[]; onOpenEvidence: (evidence: Evidence) => void
 }) {
   return (
     <div className="chat-bubble md">
@@ -81,6 +81,13 @@ const Bubble = memo(function Bubble({ role, content, showCaret, evidence, onOpen
           ))}
         </div>
       )}
+      {!!warnings?.length && (
+        <div className="chat-warning" role="status">
+          {warnings.map((warning, index) => (
+            <div key={`${warning}:${index}`}>警告：{warning}</div>
+          ))}
+        </div>
+      )}
     </div>
   )
 })
@@ -91,6 +98,7 @@ export default function ChatDrawer({
   const [msgs, setMsgs] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
   const [useSel, setUseSel] = useState(true)
+  const [conversationId, setConversationId] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
   const nearBottomRef = useRef(true)
@@ -126,6 +134,7 @@ export default function ChatDrawer({
     abortRef.current?.abort()
     requestKeyRef.current++
     setMsgs([])
+    setConversationId(null)
     const next = idleJob(requestKeyRef.current)
     jobRef.current = next
     setJob(next)
@@ -262,6 +271,15 @@ export default function ChatDrawer({
         ? (payload.evidence as any).items : null
       return (direct ?? nested ?? []).filter((item: any) => item && typeof item.path === 'string') as Evidence[]
     }
+    const mergeEvidence = (existing: Evidence[] = [], incoming: Evidence[] = []): Evidence[] => {
+      const merged = new Map<string, Evidence>()
+      for (const item of [...existing, ...incoming]) {
+        const key = [item.path, item.start_line, item.end_line, item.source_hash ?? '',
+          item.relation ?? '', item.symbol ?? ''].join(':')
+        merged.set(key, item)
+      }
+      return [...merged.values()]
+    }
     const deltaBatch = createDeltaBatch(chunks => {
       const text = chunks.get('chat') ?? ''
       if (!text) return
@@ -283,7 +301,7 @@ export default function ChatDrawer({
         deltaBatch.push('chat', text)
       } else if (envelope.type === 'evidence') {
         const evidence = evidenceItems(payload)
-        updateAssistant(message => ({ ...message, evidence }))
+        updateAssistant(message => ({ ...message, evidence: mergeEvidence(message.evidence, evidence) }))
       } else if (envelope.type === 'complete' || envelope.type === 'done') {
         deltaBatch.flush()
         const result = payload.result && typeof payload.result === 'object' ? payload.result : null
@@ -291,10 +309,16 @@ export default function ChatDrawer({
           updateAssistant(message => ({ ...message, content: (result as any).text }))
         }
         const evidence = result ? evidenceItems(result as Record<string, unknown>) : []
+        const nextConversationId = (result as any)?.conversation_id
+        if (typeof nextConversationId === 'string') setConversationId(nextConversationId)
+        const warnings = Array.isArray(payload.warnings)
+          ? payload.warnings.filter((item: unknown): item is string => typeof item === 'string')
+          : []
         updateAssistant(message => ({
           ...message,
           status: 'done',
-          evidence: evidence.length ? evidence : message.evidence,
+          evidence: mergeEvidence(message.evidence, evidence),
+          warnings,
         }))
       } else if (envelope.type === 'cancelled') {
         deltaBatch.flush()
@@ -314,7 +338,18 @@ export default function ChatDrawer({
       relative_path: relativePath,
       question,
       selection: sel,
-      history: history.map(({ role, content }) => ({ role, content })),
+      conversation_id: conversationId,
+      history: history.map(({ role, content, evidence }) => ({
+        role,
+        content,
+        evidence: (evidence ?? []).map(item => ({
+          path: item.path,
+          start_line: item.start_line,
+          end_line: item.end_line,
+          source_hash: item.source_hash ?? '',
+          symbol: item.symbol ?? null,
+        })),
+      })),
     }, handleEnvelope, ctrl.signal)
       .catch(e => {
         deltaBatch.flush()
@@ -380,7 +415,7 @@ export default function ChatDrawer({
         <span>代码追问</span>
         <span className="chat-tools">
           <button className="icon-btn" title="清空对话" disabled={streaming}
-            onClick={() => setMsgs([])}>清空</button>
+            onClick={() => { setMsgs([]); setConversationId(null) }}>清空</button>
           <button className="icon-btn" onClick={onToggle} aria-label="关闭追问">×</button>
         </span>
       </div>
@@ -406,7 +441,7 @@ export default function ChatDrawer({
         {msgs.map((m, i) => (
           <div key={i} className={`chat-msg ${m.role}`}>
             <Bubble role={m.role} content={m.content}
-              evidence={m.evidence} onOpenEvidence={onOpenEvidence}
+              evidence={m.evidence} warnings={m.warnings} onOpenEvidence={onOpenEvidence}
               showCaret={streaming && i === msgs.length - 1} />
           </div>
         ))}

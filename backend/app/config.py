@@ -86,6 +86,27 @@ class ExplainSettings(BaseModel):
     project_dependency_depth: int = Field(2, ge=0, le=5)
 
 
+class AgentSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    protocol: Literal["auto", "native", "json_schema"] = "auto"
+    max_research_steps: int = Field(3, ge=0, le=6)
+    max_tool_calls: int = Field(8, ge=1, le=24)
+    max_parallel_reads: int = Field(3, ge=1, le=8)
+    planner_max_tokens: int = Field(256, ge=64, le=2048)
+    same_call_limit: int = Field(2, ge=1, le=4)
+    no_progress_limit: int = Field(2, ge=1, le=4)
+    wall_time_seconds: int = Field(180, ge=10, le=600)
+    repo_map_tokens: int = Field(900, ge=128, le=4096)
+    tool_result_tokens: int = Field(1200, ge=128, le=4096)
+    tool_step_tokens: int = Field(3200, ge=256, le=8192)
+    context_soft_ratio: float = Field(0.75, ge=0.5, le=0.9)
+    context_hard_ratio: float = Field(0.90, ge=0.7, le=0.98)
+    session_ttl_minutes: int = Field(120, ge=5, le=1440)
+    max_sessions: int = Field(64, ge=1, le=512)
+
+
 class AppSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -93,6 +114,7 @@ class AppSettings(BaseModel):
     app_port: int = Field(8710, ge=1024, le=65535)
     llama: LlamaSettings = Field(default_factory=LlamaSettings)
     explain: ExplainSettings = Field(default_factory=ExplainSettings)
+    agent: AgentSettings = Field(default_factory=AgentSettings)
 
     @field_validator("app_host")
     @classmethod

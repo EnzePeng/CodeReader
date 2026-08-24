@@ -98,6 +98,8 @@ class Retriever:
                     "caller": row.get("caller_name") or None,
                     "receiver": row.get("receiver") or "",
                     "call_id": row.get("id"),
+                    "resolution_status": row.get("resolution_status"),
+                    "confidence": row.get("confidence"),
                 },
             ))
         return out
@@ -109,7 +111,7 @@ class Retriever:
         for rank, row in enumerate(rows, 1):
             item = self._from_symbol(
                 row, relation, 0.88 - min(rank - 1, 20) * 0.01,
-                {"rank": rank, "graph_origin": symbol},
+                {"rank": rank, "graph_origin": symbol, "symbol_id": row.get("id")},
             )
             if item is not None:
                 out.append(item)

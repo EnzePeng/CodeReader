@@ -119,6 +119,7 @@ export interface ChatMsg {
   role: 'user' | 'assistant'
   content: string
   evidence?: Evidence[]
+  warnings?: string[]
   status?: 'streaming' | 'done' | 'cancelled' | 'error'
 }
 

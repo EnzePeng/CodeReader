@@ -62,9 +62,29 @@ class _TokenClient:
         return _TokenResponse()
 
 
+class _PropsResponse:
+    status_code = 200
+
+    def __init__(self, value):
+        self.value = value
+
+    def json(self):
+        return self.value
+
+
+class _PropsClient:
+    def __init__(self):
+        self.props = {"build_info": "b1", "chat_template": "tools-v1"}
+
+    async def get(self, *_args, **_kwargs):
+        return _PropsResponse(self.props)
+
+
 class ModelBackendTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         llm._semaphore = None
+        llm._tool_protocol_cache.clear()
+        llm._tool_protocol_latest.clear()
 
     async def test_native_chat_completions_uses_model_template(self) -> None:
         client = _FakeClient()
@@ -106,6 +126,45 @@ class ModelBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count, 3)
         self.assertTrue(client.request[0].endswith("/tokenize"))
         self.assertEqual(client.request[1], {"content": "hello", "add_special": False})
+
+    async def test_tool_probe_cache_changes_with_props_identity(self) -> None:
+        client = _PropsClient()
+        cfg = {
+            "base_url": "http://127.0.0.1:8711", "model": "missing.gguf",
+            "protocol": "chat_completions",
+        }
+        completion = {
+            "choices": [{"message": {"role": "assistant", "tool_calls": [{
+                "id": "probe", "type": "function", "function": {
+                    "name": "codereader_contract_probe",
+                    "arguments": json.dumps({"value": "ok"}),
+                },
+            }]}}],
+        }
+        post = mock.AsyncMock(return_value=completion)
+        with mock.patch.object(llm, "_llama_cfg", return_value=cfg), \
+             mock.patch.object(llm, "_get_client", return_value=client), \
+             mock.patch.object(llm, "_authorization_headers", return_value={}), \
+             mock.patch.object(llm, "_post_chat", new=post):
+            self.assertEqual(await llm.probe_tool_protocol("auto"), "native")
+            self.assertEqual(await llm.probe_tool_protocol("auto"), "native")
+            self.assertEqual(post.await_count, 1)
+            client.props = {"build_info": "b2", "chat_template": "tools-v2"}
+            self.assertEqual(await llm.probe_tool_protocol("auto"), "native")
+            self.assertEqual(post.await_count, 2)
+            self.assertEqual(llm.cached_tool_protocol("auto"), "native")
+
+    async def test_structured_output_accepts_reasoning_channel_object(self) -> None:
+        completion = {
+            "choices": [{"message": {
+                "role": "assistant", "content": "",
+                "reasoning_content": "decision follows: {\"sufficient\":true,\"reason\":\"enough\",\"calls\":[]}",
+            }}],
+        }
+        with mock.patch.object(llm, "_post_chat", new=mock.AsyncMock(return_value=completion)):
+            value = await llm.structured_complete([], {"type": "object"}, 64)
+        self.assertTrue(value["sufficient"])
+        self.assertEqual(value["calls"], [])
 
 
 if __name__ == "__main__":

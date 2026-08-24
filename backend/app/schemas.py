@@ -56,12 +56,22 @@ class Selection(BaseModel):
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(max_length=20_000)
+    evidence: List["EvidenceAnchor"] = Field(default_factory=list, max_length=32)
+
+
+class EvidenceAnchor(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    source_hash: str = Field(default="", max_length=128)
+    symbol: Optional[str] = Field(default=None, max_length=512)
 
 
 class ChatRequest(ProjectPathRequest):
     question: str = Field(min_length=1, max_length=10_000)
     selection: Optional[Selection] = None
     history: List[ChatMessage] = Field(default_factory=list, max_length=50)
+    conversation_id: Optional[str] = Field(default=None, min_length=8, max_length=128)
     job_id: Optional[str] = None
 
 

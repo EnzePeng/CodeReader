@@ -12,7 +12,8 @@
 - **跨文件关系打通**：打开项目后自动建立关系索引，解析函数、类、方法、导入别名、对象构造类型、直接/递归调用与反向调用方；解读每个分段时自动携带相关真实源码，而不再只看当前 `py` 文件的一小段
 - **双栏联动**：点击右侧解读卡片，左侧代码高亮滚动到对应行；点击代码行，右侧定位对应卡片
 - **结构大纲**：类 / 函数大纲导航，点击跳转
-- **项目级追问**：拖选代码行可针对片段提问；不选代码也会携带当前文件内容/结构骨架、项目地图、上下游调用和递归依赖源码，适合询问「这个函数在哪」「谁调用它」「数据如何流动」「这个文件在项目中负责什么」
+- **项目级追问**：先由 Harness 确定性装入当前范围、import 精确定义和调用证据；证据不足时再启动最多 3 步、8 次调用的只读研究循环，适合询问「这个函数在哪」「谁调用它」「数据如何流动」「这个文件在项目中负责什么」
+- **跨文件连续会话**：追问按项目保存，点击证据切换到其他文件不会清空聊天；会话只在本地进程内保留 locator/hash，不长期复制源码正文
 - **可验证代码证据**：总览、分段和追问在正文前返回项目内证据，引用可跳转到文件与行号；定义和引用问题优先返回索引事实
 - **增量 Python 索引**：SQLite 持久化符号、调用、反向引用与 FTS5 文本块，只重建发生变化的文件，并展示索引状态
 - **专业导航**：支持 `Ctrl+P` 文件搜索、`Ctrl+Shift+O` 项目符号、`F12` 定义、`Shift+F12` 引用以及 `Alt+Left/Right` 导航历史
@@ -95,9 +96,14 @@ CodeReader/
 | `explain.segment_max_tokens_detailed` | 逐行模式每段的生成上限（默认 1600） |
 | `explain.project_overview_context_tokens` | 文件总览的项目证据 token 预算（默认 1250） |
 | `explain.project_segment_context_tokens` | 单个分段的项目证据 token 预算（默认 2000） |
-| `explain.project_chat_context_tokens` | 追问的项目证据 token 预算（默认 3000） |
-| `explain.chat_current_file_tokens` | 未选中代码时当前文件/结构骨架的 token 预算（默认 2000） |
+| `explain.project_chat_context_tokens` | 旧客户端配置兼容字段；新 `/chat` 使用统一上下文总账本 |
+| `explain.chat_current_file_tokens` | 旧客户端配置兼容字段；当前文件由 ContextBroker 按需装入 |
 | `explain.project_dependency_depth` | 关联源码递归展开层数（默认 2） |
+| `agent.protocol` | 研究协议：`auto` 探针后选择 native tool call，否则使用 JSON Schema |
+| `agent.max_research_steps` / `max_tool_calls` | 单次追问最多 3 个研究步骤 / 8 次只读工具调用 |
+| `agent.repo_map_tokens` / `tool_result_tokens` | 导航地图与单个模型可见工具结果上限 |
+| `agent.context_soft_ratio` / `context_hard_ratio` | 统一上下文总账本的压缩阈值与硬上限（默认 0.75 / 0.90） |
+| `agent.session_ttl_minutes` / `max_sessions` | 项目级内存会话 TTL 与 LRU 数量（默认 120 / 64） |
 
 ## 常见问题
 
@@ -113,6 +119,7 @@ CodeReader/
 - 推理：llama.cpp（原生 `/v1/chat/completions` 与模型聊天模板；默认单 slot；随机 API key；仅监听 `127.0.0.1`）
 - 模型：Qwen3.5-9B Q4_K_M / qwen2.5-coder-7B Q4_K_M（8GB 显存友好；快速模式使用 non-thinking profile，深度模式使用 thinking profile）
 - 项目级上下文：Python 3.13 AST + SQLite/FTS5 增量索引，以精确定义/引用、调用图和 BM25 混合召回，再按模型 tokenizer 的 token 预算打包证据
+- 追问 Harness：ContextBroker 确定性预取 + 有界只读 ResearchAgent + 项目级内存 ConversationStore；设计取舍见 [ADR-001](docs/decisions/ADR-001-evidence-first-cross-file-harness.md)
 - 后端：FastAPI + httpx（SSE 流式），Python `ast` 分段，SQLite 缓存
 - 前端：React 18 + Vite + Monaco Editor + react-markdown（全部本地打包，零 CDN）
 - 打包：PyInstaller onefile

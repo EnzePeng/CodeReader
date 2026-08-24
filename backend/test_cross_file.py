@@ -1,110 +1,129 @@
-"""跨文件上下文端到端测试。
-
-构造一个双文件小项目：lib.py 定义 TemperatureController，
-main.py 调用它。解读 main.py 时应把 lib.py 中类的定义摘要注入
-prompt，模型解读里应能指出该类来自 lib.py。
-"""
-import json
-import shutil
-import sys
-import time
+import sqlite3
+import tempfile
+import unittest
 from pathlib import Path
 
-import httpx
-
-BASE = "http://127.0.0.1:8710/api"
-PROJ = Path(__file__).parent / "tmp_test_proj"
-
-LIB = '''"""设备控制库。"""
+from app.code_index import SCHEMA_VERSION, CodeIndex
 
 
-class TemperatureController:
-    """PID 温度控制器，负责读取传感器并调节加热器功率。"""
+class CrossFileSemanticIndexTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.root = base / "project"
+        self.root.mkdir()
+        (self.root / "pkg").mkdir()
+        (self.root / "a.py").write_text(
+            "def foo():\n    return 'a'\n\nclass Repo:\n    def work(self):\n        return 'a'\n",
+            encoding="utf-8",
+        )
+        (self.root / "z.py").write_text(
+            "def foo():\n    return 'z'\n\nclass Repo:\n    def work(self):\n        return 'z'\n",
+            encoding="utf-8",
+        )
+        (self.root / "consumer.py").write_text(
+            "from z import foo as imported_foo, Repo\n"
+            "import z as zmod\n\n"
+            "def run(unknown):\n"
+            "    imported_foo()\n"
+            "    zmod.foo()\n"
+            "    repo = Repo()\n"
+            "    repo.work()\n"
+            "    unknown.work()\n",
+            encoding="utf-8",
+        )
+        (self.root / "inheritance.py").write_text(
+            "class Base:\n"
+            "    def work(self):\n        return 1\n\n"
+            "class Child(Base):\n"
+            "    def via_self(self):\n        return self.work()\n"
+            "    def via_super(self):\n        return super().work()\n\n"
+            "class Holder:\n"
+            "    def __init__(self):\n        self.repo = Child()\n"
+            "    def execute(self):\n        return self.repo.work()\n",
+            encoding="utf-8",
+        )
+        (self.root / "nested.py").write_text(
+            "def outer():\n"
+            "    def inner():\n        return 1\n"
+            "    return inner()\n",
+            encoding="utf-8",
+        )
+        (self.root / "pkg" / "__init__.py").write_text(
+            "from .impl import exported\n", encoding="utf-8")
+        (self.root / "pkg" / "impl.py").write_text(
+            "def exported():\n    return 42\n", encoding="utf-8")
+        (self.root / "pkg" / "use.py").write_text(
+            "from . import exported\n\ndef use():\n    return exported()\n", encoding="utf-8")
+        (self.root / "cycle_a.py").write_text(
+            "from cycle_b import b\n\ndef a():\n    return b()\n", encoding="utf-8")
+        (self.root / "cycle_b.py").write_text(
+            "from cycle_a import a\n\ndef b():\n    return 1\n", encoding="utf-8")
+        self.db = base / "index.db"
+        self.index = CodeIndex(self.db)
+        self.index.index_project(self.root)
 
-    def __init__(self, kp: float, ki: float, kd: float):
-        self.kp, self.ki, self.kd = kp, ki, kd
-        self._integral = 0.0
-        self._last_err = 0.0
+    def tearDown(self) -> None:
+        self.temp.cleanup()
 
-    def step(self, target: float, current: float, dt: float) -> float:
-        err = target - current
-        self._integral += err * dt
-        deriv = (err - self._last_err) / dt if dt > 0 else 0.0
-        self._last_err = err
-        return self.kp * err + self.ki * self._integral + self.kd * deriv
+    def _call(self, path: str, line: int, name: str):
+        rows = self.index.call_rows(self.root, name, limit=200)
+        return next(row for row in rows if row["path"] == path and row["start_line"] == line)
 
+    def _target(self, path: str, line: int, name: str):
+        call = self._call(path, line, name)
+        self.assertEqual(call["resolution_status"], "resolved")
+        return self.index.symbol_by_id(self.root, int(call["target_symbol_id"]))
 
-def load_profile(path: str) -> list:
-    """从文本文件加载升温曲线，每行 "时间,温度"。"""
-    out = []
-    with open(path) as f:
-        for line in f:
-            t, temp = line.strip().split(",")
-            out.append((float(t), float(temp)))
-    return out
-'''
+    def test_explicit_alias_relative_reexport_and_cycles_resolve_exactly(self) -> None:
+        self.assertEqual(self._target("consumer.py", 5, "foo")["path"], "z.py")
+        self.assertEqual(self._target("consumer.py", 6, "foo")["path"], "z.py")
+        exported = self._target("pkg/use.py", 4, "exported")
+        self.assertEqual((exported["path"], exported["qualified_name"]), ("pkg/impl.py", "exported"))
+        self.assertEqual(self._target("cycle_a.py", 4, "b")["path"], "cycle_b.py")
 
-MAIN = '''"""烧结炉控温主程序。"""
-from lib import TemperatureController, load_profile
+    def test_instances_self_super_inheritance_and_nested_scope(self) -> None:
+        repo_work = self._target("consumer.py", 8, "work")
+        self.assertEqual((repo_work["path"], repo_work["qualified_name"]), ("z.py", "Repo.work"))
+        for line in (7, 9, 15):
+            target = self._target("inheritance.py", line, "work")
+            self.assertEqual(target["qualified_name"], "Base.work")
+        nested = self._target("nested.py", 4, "inner")
+        self.assertEqual(nested["qualified_name"], "outer.inner")
 
+    def test_unknown_receiver_with_same_name_is_ambiguous_not_false_exact(self) -> None:
+        call = self._call("consumer.py", 9, "work")
+        self.assertEqual(call["resolution_status"], "ambiguous")
+        self.assertIsNone(call["target_symbol_id"])
 
-def run(profile_path: str):
-    ctrl = TemperatureController(kp=2.0, ki=0.1, kd=0.5)
-    profile = load_profile(profile_path)
-    current = 25.0
-    for t, target in profile:
-        power = ctrl.step(target, current, dt=1.0)
-        current += power * 0.01
-    return current
-'''
+    def test_mixed_natural_language_query_still_recalls_identifier(self) -> None:
+        rows = self.index.search_text(self.root, "foo 这个函数内部怎么实现", limit=20)
+        self.assertTrue(any("def foo" in row["content"] for row in rows))
 
-
-def main() -> None:
-    PROJ.mkdir(exist_ok=True)
-    (PROJ / "lib.py").write_text(LIB, encoding="utf-8")
-    (PROJ / "main.py").write_text(MAIN, encoding="utf-8")
-
-    # 等待就绪
-    for _ in range(120):
+    def test_incompatible_schema_is_built_then_atomically_replaced(self) -> None:
+        old = Path(self.temp.name) / "old.db"
+        conn = sqlite3.connect(old)
         try:
-            r = httpx.get(BASE + "/health", timeout=5.0).json()
-            if r["llama"]["ready"]:
-                print("[ready]", r["model"])
-                break
-        except Exception:
-            pass
-        time.sleep(2)
-    else:
-        print("[error] 模型未就绪")
-        sys.exit(1)
-
-    texts = {}
-    t0 = time.time()
-    with httpx.stream("POST", BASE + "/explain",
-                      json={"path": str(PROJ / "main.py"), "force": "all",
-                            "project_root": str(PROJ)},
-                      timeout=httpx.Timeout(600, connect=10)) as resp:
-        assert resp.status_code == 200, resp.status_code
-        event = ""
-        for line in resp.iter_lines():
-            if line.startswith("event:"):
-                event = line[6:].strip()
-            elif line.startswith("data:"):
-                data = json.loads(line[5:])
-                if event == "segment_done":
-                    texts[data["id"]] = data["text"]
-                elif event == "error":
-                    print("[error]", data["message"])
-                    sys.exit(1)
-    print(f"[done] {len(texts)} 段, 用时 {time.time()-t0:.1f}s")
-    all_text = "\n\n".join(texts.values())
-    print("=" * 60)
-    print(all_text)
-    print("=" * 60)
-    hit = ("lib.py" in all_text) or ("lib 模块" in all_text) or ("lib 文件" in all_text)
-    print("跨文件提及 lib.py:", "是" if hit else "否（需人工检查上文）")
-    shutil.rmtree(PROJ, ignore_errors=True)
+            conn.executescript(
+                "CREATE TABLE schema_version(version INTEGER NOT NULL);"
+                "INSERT INTO schema_version VALUES (1);"
+                "CREATE TABLE legacy_marker(value TEXT);"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        CodeIndex(old)
+        conn = sqlite3.connect(old)
+        try:
+            version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+            marker = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_marker'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(version, SCHEMA_VERSION)
+        self.assertIsNone(marker)
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

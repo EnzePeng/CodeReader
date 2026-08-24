@@ -1067,7 +1067,7 @@ export default function App() {
         onToggle={() => setChatOpen(value => !value)}
         projectId={project?.project_id ?? null}
         relativePath={fileInfo?.relative_path ?? null}
-        sessionKey={`${project?.project_id ?? ''}:${fileInfo?.relative_path ?? ''}`}
+        sessionKey={project?.project_id ?? ''}
         selection={selection}
         ready={ready}
         onOpenEvidence={evidence => { void openEvidence(evidence) }}

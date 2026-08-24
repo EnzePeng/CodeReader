@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import string
 import threading
 import urllib.parse
@@ -18,13 +19,24 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import cache, explainer, llama_launcher, llm, project_index, segmenter
+from . import cache, explainer, llama_launcher, llm, segmenter
 from .citations import CitationFilter, EvidenceCatalog
-from .config import APP_VERSION, data_dir, get_config, model_id, resolve_path, update_config_file
+from .config import (
+    APP_VERSION,
+    data_dir,
+    get_config,
+    get_settings,
+    model_id,
+    resolve_path,
+    update_config_file,
+)
+from .context_broker import ContextBroker
 from .context_packer import ContextPacker
+from .conversation import ConversationStore
 from .diagnostics import diagnostics
-from .exploration import ExplorationRequest, ReadOnlyExplorer
+from .exploration import TOOL_SCHEMA_VERSION, ExplorationRequest, ReadOnlyExplorer
 from .projects import registry as project_registry
+from .research_agent import ResearchAgent
 from .schemas import (
     ChatRequest,
     ExplainRequest,
@@ -43,6 +55,7 @@ _INDEX_MANAGER_LOCK = threading.RLock()
 _CODE_INDEX: Any = None
 _INDEX_STATUS: Dict[str, Any] = {}
 _INDEX_INFLIGHT: Dict[str, Future] = {}
+_CONVERSATIONS = ConversationStore()
 
 _REPORT_LOCK = threading.RLock()
 _REPORTS: "OrderedDict[tuple, Dict[str, Any]]" = OrderedDict()
@@ -282,9 +295,19 @@ def stream_sse(sequence: StreamSequence, event_type: StreamType,
     return sse(event_type, envelope)
 
 
-def evidence_signature(items: List[Dict[str, Any]]) -> str:
-    normalized = json.dumps(items, ensure_ascii=False, sort_keys=True,
-                            separators=(",", ":"))
+def evidence_signature(items: List[Dict[str, Any]], *, index_revision: int = 0,
+                       protocol: str = "deterministic") -> str:
+    normalized = json.dumps(
+        {
+            "items": items,
+            "index_revision": index_revision,
+            "tool_schema_version": TOOL_SCHEMA_VERSION,
+            "protocol": protocol,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
@@ -292,29 +315,81 @@ def _join_context(*parts: str) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def _ambiguous_answer(items: List[Dict[str, Any]]) -> str:
+    symbols = sorted({str(item.get("symbol")) for item in items if item.get("symbol")})
+    target = " / ".join(symbols) if symbols else "目标符号"
+    locators = "；".join(
+        f"{item['path']}:{item['start_line']}-{item['end_line']} [{item['id']}]"
+        for item in items
+    )
+    return (
+        f"仅凭当前静态源码无法唯一确定 `{target}` 的实际绑定。"
+        f"索引得到多个同名候选：{locators}。"
+        "当前证据缺少能把调用表达式唯一关联到某个候选的静态类型、导入或调用点信息；"
+        "因此不能断言绑定其中任意一个。若接收者由参数传入，具体目标取决于运行时对象。"
+    )
+
+
+def _multi_hop_answer(items: List[Dict[str, Any]]) -> str:
+    qualified = [
+        str((item.get("metadata") or {}).get("qualified_name") or item.get("symbol") or "")
+        for item in items
+    ]
+    selected: List[Dict[str, Any]] = []
+    seen: set[tuple[str, int, int, str]] = set()
+    for item, name in zip(items, qualified):
+        metadata = item.get("metadata") or {}
+        if metadata.get("kind") == "class" and any(
+                other.startswith(name + ".") for other in qualified if other != name):
+            continue
+        key = (
+            str(item.get("path")), int(item.get("start_line") or 0),
+            int(item.get("end_line") or 0), name,
+        )
+        if name and key not in seen:
+            seen.add(key)
+            selected.append(item)
+    names = [
+        str((item.get("metadata") or {}).get("qualified_name") or item.get("symbol"))
+        for item in selected
+    ]
+    blocks = [f"静态索引已验证的调用链：{' → '.join(f'`{name}`' for name in names)}。"]
+    for item, name in zip(selected, names):
+        blocks.append(
+            f"- `{name}` — `{item['path']}:{item['start_line']}-{item['end_line']}` "
+            f"[{item['id']}]\n\n```{item.get('language') or ''}\n{item.get('content') or ''}\n```"
+        )
+    return "\n\n".join(blocks)
+
+
 async def _pack_evidence(items: List[Any], base_messages: List[Dict[str, str]],
                          output_tokens: int, catalog: EvidenceCatalog,
                          evidence_budget_tokens: Optional[int] = None):
-    """Pack with the active tokenizer, then assign citation IDs."""
+    """Pack against one rendered-request ledger, then assign citation IDs."""
     cfg = get_config()
     serialized = json.dumps(base_messages, ensure_ascii=False,
                             sort_keys=True, separators=(",", ":"))
     try:
-        base_tokens = await llm.count_tokens(serialized)
+        base_tokens = await llm.count_message_tokens(base_messages)
     except Exception:
         # Tokenization is an optimization boundary; generation can continue
         # with a conservative local estimate if the auxiliary route fails.
         base_tokens = max(1, len(serialized) // 3)
-    safe_context = max(0, int(int(cfg["llama"]["ctx_size"]) * 0.9))
-    if evidence_budget_tokens is not None:
-        safe_context = min(
-            safe_context,
-            int(base_tokens) + int(output_tokens) + max(0, int(evidence_budget_tokens)),
-        )
+    agent_cfg = cfg["agent"]
+    safe_context = max(
+        0, int(int(cfg["llama"]["ctx_size"]) * float(agent_cfg["context_hard_ratio"]))
+    )
+    thinking_reserve = (
+        int(cfg["llama"].get("thinking_extra_tokens", 0))
+        if bool(cfg["llama"].get("thinking", False)) else 0
+    )
+    output_reserve = int(output_tokens) + thinking_reserve
+    # This is a category ceiling inside the same ledger, not a second context budget.
+    safe_context = min(safe_context, int(base_tokens) + output_reserve + 6500)
     packer = ContextPacker(
         token_counter=lambda text: max(1, len(text) // 3),
         context_window_tokens=safe_context,
-        output_reserve_tokens=int(output_tokens),
+        output_reserve_tokens=output_reserve,
         system_reserve_tokens=int(base_tokens),
         history_reserve_tokens=0,
     )
@@ -376,6 +451,9 @@ async def health() -> Dict[str, Any]:
         llama_launcher.schedule_ensure_running()
         st = llama_launcher.status()
     llama_cfg = get_config()["llama"]
+    agent_cfg = get_config()["agent"]
+    tool_protocol = llm.cached_tool_protocol(str(agent_cfg.get("protocol", "auto")))
+    agent_enabled = bool(agent_cfg.get("enabled", False))
     return {
         "app_version": APP_VERSION,
         "model": model_id(),
@@ -384,7 +462,10 @@ async def health() -> Dict[str, Any]:
             "native_chat": llama_cfg.get("protocol") == "chat_completions",
             "thinking": llm.is_thinking_model(llama_cfg),
             "structured_output": True,
-            "read_only_tools": True,
+            "read_only_tools": agent_enabled and bool(ReadOnlyExplorer.ALLOWED_TOOLS),
+            "agent_loop": agent_enabled,
+            "tool_protocol": tool_protocol,
+            "semantic_languages": ["python"] if agent_enabled else [],
         },
         "context_tokens": int(llama_cfg["ctx_size"]),
         "scheduler": {
@@ -799,7 +880,6 @@ async def explain(request: Request, body: ExplainRequest) -> StreamingResponse:
     resolved = _project_file(body.project_id, body.relative_path)
     p = resolved.path
     relative_path = resolved.relative_path
-    project_root = str(resolved.project.root)
     text, _, _ = read_text_smart(p)
     seg_result = segmenter.segment_file(text, p.suffix)
     segments = seg_result["segments"]
@@ -807,11 +887,6 @@ async def explain(request: Request, body: ExplainRequest) -> StreamingResponse:
     display_name = p.name
     cfg = get_config()["explain"]
     sequence = StreamSequence(scope_id=relative_path)
-
-    # 项目符号索引（跨文件上下文），在线程池构建避免阻塞
-    proj_idx = await asyncio.get_running_loop().run_in_executor(
-        None, project_index.get_index, project_root)
-    rel_file = relative_path
 
     force = body.force
     force_all = force == "all"
@@ -880,17 +955,60 @@ async def explain(request: Request, body: ExplainRequest) -> StreamingResponse:
                         "details": {"diagnostic_id": diagnostic_id}})
                     return
 
-            # 2. 文件总览
-            overview_ctx = project_index.build_project_context(
-                proj_idx, text, rel_file, project_root,
-                # Legacy project-map builder still consumes a character ceiling;
-                # the authoritative Evidence pack below is tokenizer-counted.
-                max_chars=int(cfg["project_overview_context_tokens"]) * 4,
-                max_symbols=5,
-                dependency_depth=int(cfg["project_dependency_depth"]),
+            yield stream_sse(sequence, "status", {
+                "state": "indexing", "message": "正在校验增量代码索引"})
+            project, retriever = await asyncio.get_running_loop().run_in_executor(
+                None, _make_retriever, body.project_id)
+            settings = get_settings()
+            broker = ContextBroker(
+                retriever.index, retriever, project.root, settings.agent.repo_map_tokens)
+            yield stream_sse(sequence, "status", {
+                "state": "preflight", "message": "正在为所有分段共享预取跨文件证据"})
+            shared_context = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: broker.collect(
+                    f"解释 {relative_path} 的整体职责、跨文件依赖和调用关系",
+                    relative_path,
+                ),
             )
-            overview_evidence = await _retrieve_evidence(
-                body.project_id, text[:12000], relative_path, limit=12)
+            shared_extra = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: retriever.retrieve(text[:12000], current_file=relative_path, limit=36),
+            )
+            shared_evidence: List[Any] = []
+            shared_keys = set()
+            for item in list(shared_context.evidence) + list(shared_extra):
+                evidence_key = (
+                    item.path, item.start_line, item.end_line, item.relation, item.symbol
+                )
+                if evidence_key not in shared_keys and item.validate(project.root):
+                    shared_keys.add(evidence_key)
+                    shared_evidence.append(item)
+            generation_warnings.extend(shared_context.warnings)
+            repository_map = (
+                "## Repository Map（仅用于导航，不可单独支撑行为断言）\n"
+                + shared_context.repository_map
+            )
+
+            def segment_evidence(segment: Dict[str, Any]) -> List[Any]:
+                identifiers = set(re.findall(r"[A-Za-z_]\w*", segment["code"]))
+                relevant: List[Any] = []
+                fallback: List[Any] = []
+                for item in shared_evidence:
+                    overlaps = (
+                        item.path == relative_path
+                        and item.start_line <= int(segment["end_line"])
+                        and item.end_line >= int(segment["start_line"])
+                    )
+                    if overlaps or (item.symbol and item.symbol in identifiers):
+                        relevant.append(item)
+                    elif item.relation in {"definition", "caller", "callee"}:
+                        fallback.append(item)
+                return (relevant + fallback)[:18]
+
+            # 2. 文件总览
+            overview_ctx = repository_map
+            overview_evidence = shared_evidence[:36]
             overview_base_msgs = explainer.build_overview_messages(
                 display_name, text, segments, language,
                 project_context=overview_ctx)
@@ -900,7 +1018,6 @@ async def explain(request: Request, body: ExplainRequest) -> StreamingResponse:
                     overview_base_msgs,
                     int(cfg["overview_max_tokens"]),
                     catalog,
-                    int(cfg["project_overview_context_tokens"]),
                 )
             )
             if packed_overview.warning:
@@ -911,7 +1028,11 @@ async def explain(request: Request, body: ExplainRequest) -> StreamingResponse:
             ov_key = explainer.request_cache_key(
                 kind="overview", relative_path=relative_path,
                 messages=overview_msgs,
-                evidence_signature=evidence_signature(labelled_overview))
+                evidence_signature=evidence_signature(
+                    labelled_overview,
+                    index_revision=shared_context.index_revision,
+                    protocol=str(settings.agent.protocol),
+                ))
             overview_text = cache.get(ov_key)
             if labelled_overview:
                 yield stream_sse(sequence, "evidence", {
@@ -964,24 +1085,17 @@ async def explain(request: Request, body: ExplainRequest) -> StreamingResponse:
                         "reason": "client_disconnected"})
                     return
                 mode = seg_modes[s["id"]]
-                proj_ctx = project_index.build_project_context(
-                    proj_idx, s["code"], rel_file, project_root,
-                    max_chars=int(cfg["project_segment_context_tokens"]) * 4,
-                    max_symbols=8,
-                    dependency_depth=int(cfg["project_dependency_depth"]),
-                )
+                proj_ctx = repository_map
                 base_msgs = explainer.build_segment_messages(
                     display_name, overview_text or "", imports_summary, s, language,
                     project_context=proj_ctx, mode=mode)
-                evidence = await _retrieve_evidence(
-                    body.project_id, s["code"], relative_path, limit=12)
+                evidence = segment_evidence(s)
                 packed, labelled, evidence_prompt = await _pack_evidence(
                     evidence,
                     base_msgs,
                     int(cfg["segment_max_tokens_detailed"] if mode == "detailed"
                         else cfg["segment_max_tokens"]),
                     catalog,
-                    int(cfg["project_segment_context_tokens"]),
                 )
                 if packed.warning:
                     generation_warnings.append(packed.warning)
@@ -996,11 +1110,15 @@ async def explain(request: Request, body: ExplainRequest) -> StreamingResponse:
                         "omitted_evidence": len(packed.omitted),
                         "warning": packed.warning,
                     })
-                key = explainer.request_cache_key(
+                segment_cache_key = explainer.request_cache_key(
                     kind="segment", relative_path=relative_path,
                     messages=msgs, mode=mode,
-                    evidence_signature=evidence_signature(labelled))
-                cached_text = cache.get(key)
+                    evidence_signature=evidence_signature(
+                        labelled,
+                        index_revision=shared_context.index_revision,
+                        protocol=str(settings.agent.protocol),
+                    ))
+                cached_text = cache.get(segment_cache_key)
                 if cached_text and not need_regen(s["id"]):
                     llm.record_cache_hit("segment", packed.used_tokens)
                     cached_text, invalid = _filtered_text(
@@ -1038,7 +1156,9 @@ async def explain(request: Request, body: ExplainRequest) -> StreamingResponse:
                 if not full:
                     raise RuntimeError("模型返回空解读")
                 report_segments[s["id"]] = {"mode": mode, "text": full}
-                pending_cache_put(key, relative_path, "segment", full, model_id())
+                pending_cache_put(
+                    segment_cache_key, relative_path, "segment", full, model_id()
+                )
 
             for write in cache_writes:
                 cache.put(*write)
@@ -1076,19 +1196,12 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
     resolved = _project_file(body.project_id, body.relative_path)
     p = resolved.path
     relative_path = resolved.relative_path
-    project_root = str(resolved.project.root)
     text, _, _ = read_text_smart(p)
     language = segmenter.language_for(p.suffix)
     cfg = get_config()["explain"]
     sequence = StreamSequence(scope_id=relative_path)
-
-    proj_idx = await asyncio.get_running_loop().run_in_executor(
-        None, project_index.get_index, project_root)
-    rel_file = relative_path
-    overview = None
-
-    selection_code = None
     selection_range = None
+    selection_lines = None
     if body.selection is not None:
         lines = text.splitlines()
         s = max(1, body.selection.start_line)
@@ -1097,54 +1210,13 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
             max_sel = 400
             if e - s + 1 > max_sel:
                 e = s + max_sel - 1
-            selection_code = "\n".join(lines[s - 1:e])
             selection_range = f"第 {s}~{e} 行"
-
-    # 追问使用与解读一致的分层项目上下文。没有选区时仍以整个当前文件为检索线索，
-    # 并额外注入完整文件或结构骨架，避免只能回答被点中的局部代码。
-    context_source = selection_code if selection_code is not None else text
-    proj_ctx = project_index.build_project_context(
-        proj_idx, context_source, rel_file, project_root,
-        question=body.question,
-        max_chars=int(cfg["project_chat_context_tokens"]) * 4,
-        max_symbols=10,
-        dependency_depth=int(cfg["project_dependency_depth"]),
-    )
-    current_file_context = ""
-    if selection_code is None:
-        current_budget = int(cfg["chat_current_file_tokens"]) * 4
-        if len(text) <= current_budget:
-            current_file_context = text
-        else:
-            current_file_context = explainer.build_skeleton(
-                segmenter.segment_file(text, p.suffix)["segments"], current_budget)
-
-    base_msgs = explainer.build_chat_messages(
-        p.name, overview, selection_code, selection_range,
-        [h.model_dump() for h in body.history], body.question, language,
-        project_context=proj_ctx, current_file_context=current_file_context)
-    evidence = await _retrieve_evidence(
-        body.project_id, context_source + "\n" + body.question,
-        relative_path, limit=12)
-    catalog = EvidenceCatalog()
-    packed, labelled, evidence_prompt = await _pack_evidence(
-        evidence, base_msgs, int(cfg["chat_max_tokens"]), catalog,
-        int(cfg["project_chat_context_tokens"]))
-    msgs = explainer.build_chat_messages(
-        p.name, overview, selection_code, selection_range,
-        [h.model_dump() for h in body.history], body.question, language,
-        project_context=_join_context(proj_ctx, evidence_prompt),
-        current_file_context=current_file_context)
+            selection_lines = (s, e)
 
     async def gen():
+        trace_id = _diagnostic_id()
+        conversation = None
         try:
-            if labelled:
-                yield stream_sse(sequence, "evidence", {
-                    "items": labelled,
-                    "used_tokens": packed.used_tokens,
-                    "omitted_evidence": len(packed.omitted),
-                    "warning": packed.warning,
-                })
             if not await llm.health_check():
                 yield stream_sse(sequence, "status", {
                     "state": "starting_model",
@@ -1160,31 +1232,357 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
                         "code": "model_unavailable", "message": "模型服务不可用",
                         "details": {"diagnostic_id": diagnostic_id}})
                     return
+            settings = get_settings()
+            _CONVERSATIONS.reconfigure(
+                settings.agent.session_ttl_minutes, settings.agent.max_sessions)
+            browser_session_id = str(getattr(request.state, "session_id", "local"))
+            conversation, _ = _CONVERSATIONS.get_or_create(
+                body.conversation_id,
+                browser_session_id,
+                body.project_id,
+                relative_path,
+                body.history,
+            )
+            all_prior_history = conversation.messages(complete_turns=32)
+            prior_history = all_prior_history[-8:]
+            older_history = all_prior_history[:-8]
+            if older_history:
+                summary = "；".join(
+                    f"{item['role']}: {item['content'][:160]}" for item in older_history
+                )[:2048]
+                if summary != conversation.checkpoint:
+                    _CONVERSATIONS.append(
+                        conversation, "checkpoint", {"summary": summary}
+                    )
+            _CONVERSATIONS.append(conversation, "user", {"content": body.question})
+
+            yield stream_sse(sequence, "status", {
+                "state": "indexing", "message": "正在校验增量代码索引"})
+            project, retriever = await asyncio.get_running_loop().run_in_executor(
+                None, _make_retriever, body.project_id)
+            broker = ContextBroker(
+                retriever.index, retriever, project.root, settings.agent.repo_map_tokens)
+            yield stream_sse(sequence, "status", {
+                "state": "preflight", "message": "正在确定性解析符号、导入与调用关系"})
+            context = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: broker.collect(
+                    body.question, relative_path, selection_lines, conversation.anchors),
+            )
+            warnings = list(context.warnings)
+            fresh_history: List[Dict[str, Any]] = []
+            stale_history_count = 0
+            for message in prior_history:
+                anchors = message.get("evidence")
+                stale_message = False
+                if isinstance(anchors, list):
+                    for anchor in anchors:
+                        if not isinstance(anchor, dict):
+                            continue
+                        record = retriever.index.file_record(
+                            project.root, str(anchor.get("path") or "")
+                        )
+                        expected_hash = str(anchor.get("source_hash") or "")
+                        if (record is None or (
+                            expected_hash and expected_hash != str(record.get("source_hash") or "")
+                        )):
+                            stale_message = True
+                            break
+                if stale_message:
+                    stale_history_count += 1
+                else:
+                    fresh_history.append(message)
+            if stale_history_count:
+                prior_history = fresh_history
+                _CONVERSATIONS.append(conversation, "checkpoint", {"summary": ""})
+                warnings.append(
+                    f"已从模型上下文移除 {stale_history_count} 条依赖旧源码的历史回答"
+                )
+            catalog = EvidenceCatalog()
+            cumulative = catalog.add([item.to_dict() for item in context.evidence])
+            if cumulative:
+                yield stream_sse(sequence, "evidence", {
+                    "items": cumulative,
+                    "stage": "preflight",
+                    "index_revision": context.index_revision,
+                })
+            _CONVERSATIONS.append(conversation, "tool_result", {
+                "stage": "preflight",
+                "evidence": cumulative,
+                "index_revision": context.index_revision,
+            })
+
+            evidence = list(context.evidence)
+            steps_used = 0
+            tool_calls_used = 0
+            stop_reason = "preflight_sufficient" if context.sufficient else "agent_disabled"
+            tool_protocol = "none"
+            if not context.sufficient and settings.agent.enabled:
+                if await request.is_disconnected():
+                    yield stream_sse(sequence, "cancelled", {"reason": "client_disconnected"})
+                    return
+                yield stream_sse(sequence, "status", {
+                    "state": "exploring", "message": context.reason})
+                explorer = ReadOnlyExplorer(
+                    project.root, retriever,
+                    max_steps=settings.agent.max_research_steps,
+                    current_file=relative_path,
+                    model_config={
+                        "model": settings.llama.model,
+                        "ctx_size": settings.llama.ctx_size,
+                        "thinking": settings.llama.thinking,
+                        "protocol": settings.agent.protocol,
+                    },
+                )
+                outcome = await ResearchAgent(explorer, settings.agent).run(
+                    body.question, evidence, context.repository_map)
+                evidence = outcome.evidence
+                steps_used = outcome.steps_used
+                tool_calls_used = outcome.tool_calls_used
+                stop_reason = outcome.stop_reason
+                tool_protocol = outcome.protocol
+                warnings.extend(outcome.warnings)
+                for event in outcome.tool_events:
+                    _CONVERSATIONS.append(conversation, "tool_call", event)
+                cumulative = catalog.add([item.to_dict() for item in evidence])
+                if cumulative:
+                    yield stream_sse(sequence, "evidence", {
+                        "items": cumulative,
+                        "stage": "research",
+                        "index_revision": context.index_revision,
+                    })
+                _CONVERSATIONS.append(conversation, "tool_result", {
+                    "stage": "research",
+                    "stop_reason": stop_reason,
+                    "evidence": cumulative,
+                    "index_revision": context.index_revision,
+                })
+            elif not context.sufficient:
+                warnings.append("ResearchAgent 已禁用；将仅依据现有证据回答 unresolved")
+
+            coverage_note = ""
+            if not context.sufficient and stop_reason not in {"sufficient"}:
+                coverage_note = (
+                    "## 证据覆盖边界\n"
+                    f"{context.reason}。只能陈述下方证据直接支持的事实；"
+                    "缺失的源码事实必须明确标为未解析，禁止猜测。"
+                )
+            target_symbol_ids = set(context.target_symbol_ids)
+            target_lines = sorted({
+                f"- {item.path}:{item.start_line}-{item.end_line}"
+                + (f" ({item.symbol})" if item.symbol else "")
+                for item in evidence
+                if (
+                    target_symbol_ids
+                    and item.metadata.get("symbol_id") in target_symbol_ids
+                    and item.metadata.get("resolution") in {"exact", "enclosing"}
+                )
+            })
+            if not target_lines:
+                target_lines = sorted({
+                    f"- {item.path}:{item.start_line}-{item.end_line}"
+                    + (f" ({item.symbol})" if item.symbol else "")
+                    for item in evidence
+                    if item.metadata.get("resolution") == "enclosing"
+                })
+            target_note = ""
+            if target_lines:
+                target_note = (
+                    "## 当前问题的精确目标\n"
+                    + "\n".join(target_lines)
+                    + "\n目标函数的直接返回值和实现只能从这些精确目标 Evidence 判断；"
+                    "其他 Evidence 仅用于调用者或依赖上下文，不得混为目标结果。"
+                )
+            checkpoint = conversation.checkpoint
+            generation_history = [] if context.direct_target else prior_history
+            navigation_context = _join_context(
+                ("## 会话 checkpoint\n" + checkpoint) if checkpoint else "",
+                target_note,
+                coverage_note,
+            )
+            base_msgs = explainer.build_chat_messages(
+                p.name, None, None, selection_range,
+                generation_history, body.question, language,
+                project_context=navigation_context, current_file_context="")
+
+            llama_cfg = get_config()["llama"]
+            output_reserve = int(cfg["chat_max_tokens"])
+            if bool(llama_cfg.get("thinking", False)):
+                output_reserve += int(llama_cfg.get("thinking_extra_tokens", 0))
+            hard_limit = int(
+                int(llama_cfg["ctx_size"]) * float(settings.agent.context_hard_ratio))
+            try:
+                base_tokens = await llm.count_message_tokens(base_msgs)
+            except Exception:
+                base_tokens = max(1, len(json.dumps(base_msgs, ensure_ascii=False)) // 3)
+            soft_limit = int(
+                int(llama_cfg["ctx_size"]) * float(settings.agent.context_soft_ratio))
+            if base_tokens >= soft_limit and conversation.checkpoint:
+                yield stream_sse(sequence, "status", {
+                    "state": "compacting",
+                    "message": "已用结构化 checkpoint 替代四轮之前的会话正文",
+                })
+
+            if base_tokens + output_reserve >= hard_limit:
+                warnings.append("上下文较小，已移除较旧的会话 checkpoint")
+                navigation_context = _join_context(
+                    target_note,
+                    coverage_note,
+                )
+                generation_history = generation_history[-4:]
+                base_msgs = explainer.build_chat_messages(
+                    p.name, None, None, selection_range,
+                    generation_history, body.question, language,
+                    project_context=navigation_context, current_file_context="")
+
+            yield stream_sse(sequence, "status", {
+                "state": "reading", "message": "正在校验并装入源码 Evidence"})
+            synthesis_evidence = evidence
+            if context.direct_target and target_symbol_ids:
+                target_symbols = {
+                    item.symbol for item in evidence
+                    if item.metadata.get("symbol_id") in target_symbol_ids and item.symbol
+                }
+                focused = [
+                    item for item in evidence
+                    if item.metadata.get("symbol_id") in target_symbol_ids
+                    or (
+                        item.relation == "callee"
+                        and item.metadata.get("graph_origin") in target_symbols
+                    )
+                ]
+                if focused:
+                    synthesis_evidence = focused
+            packed, labelled, evidence_prompt = await _pack_evidence(
+                synthesis_evidence, base_msgs, int(cfg["chat_max_tokens"]), catalog)
+            if packed.warning:
+                warnings.append(packed.warning)
+            msgs = explainer.build_chat_messages(
+                p.name, None, None, selection_range,
+                generation_history, body.question, language,
+                project_context=_join_context(navigation_context, evidence_prompt),
+                current_file_context="")
+            input_tokens = await llm.count_message_tokens(msgs)
+            if input_tokens + output_reserve > hard_limit:
+                trimmed = list(packed.evidence)
+                while input_tokens + output_reserve > hard_limit and trimmed:
+                    trimmed.pop()
+                    evidence_prompt = EvidenceCatalog.prompt_text(
+                        catalog.add([item.to_dict() for item in trimmed]))
+                    msgs = explainer.build_chat_messages(
+                        p.name, None, None, selection_range,
+                        generation_history, body.question, language,
+                        project_context=_join_context(navigation_context, evidence_prompt),
+                        current_file_context="")
+                    input_tokens = await llm.count_message_tokens(msgs)
+                if input_tokens + output_reserve > hard_limit:
+                    raise RuntimeError("统一 token 总账本无法容纳当前问题和输出预留")
+                warnings.append("为满足上下文硬上限，已进一步裁剪低优先级 Evidence")
+
+            deterministic_items: List[Dict[str, Any]] = []
+            deterministic_answer = ""
+            deterministic_message = ""
+            if stop_reason == "unresolved_ambiguous":
+                deterministic_items = catalog.add([
+                    item.to_dict() for item in evidence
+                    if item.metadata.get("resolution") == "ambiguous_candidate"
+                ])
+                deterministic_answer = _ambiguous_answer(deterministic_items)
+                deterministic_message = "正在生成静态歧义的确定性答复"
+            elif context.multi_hop and stop_reason == "sufficient":
+                deterministic_items = catalog.add([
+                    item.to_dict() for item in evidence
+                    if item.relation == "callee"
+                    or item.metadata.get("symbol_id") in target_symbol_ids
+                ])
+                deterministic_answer = _multi_hop_answer(deterministic_items)
+                deterministic_message = "正在生成多跳调用链的精确 locator 答复"
+            if deterministic_answer:
+                final_answer = deterministic_answer
+                warnings = list(dict.fromkeys(warnings))
+                yield stream_sse(sequence, "status", {
+                    "state": "synthesizing",
+                    "message": deterministic_message,
+                })
+                yield stream_sse(sequence, "delta", {
+                    "text": final_answer, "target": "answer"})
+                _CONVERSATIONS.append(conversation, "assistant", {
+                    "content": final_answer,
+                    "evidence": deterministic_items,
+                    "trace_id": trace_id,
+                })
+                yield stream_sse(sequence, "complete", {
+                    "result": {
+                        "conversation_id": conversation.conversation_id,
+                        "trace_id": trace_id,
+                        "path": relative_path,
+                        "steps_used": steps_used,
+                        "tool_calls_used": tool_calls_used,
+                        "stop_reason": stop_reason,
+                        "tool_protocol": tool_protocol,
+                        "warnings": warnings,
+                        "evidence": deterministic_items,
+                        "input_tokens": input_tokens,
+                    },
+                    "warnings": warnings,
+                })
+                return
+
+            yield stream_sse(sequence, "status", {
+                "state": "synthesizing", "message": "正在基于可验证代码证据生成回答"})
             citation_filter = CitationFilter(catalog.valid_ids)
+            answer_parts: List[str] = []
             async for piece in llm.stream_chat(
                     msgs, max_tokens=cfg["chat_max_tokens"], task="chat",
-                    context_tokens=packed.used_tokens):
+                    context_tokens=input_tokens):
                 if await request.is_disconnected():
                     yield stream_sse(sequence, "cancelled", {
                         "reason": "client_disconnected"})
                     return
                 filtered = citation_filter.feed(piece)
                 if filtered:
+                    answer_parts.append(filtered)
                     yield stream_sse(sequence, "delta", {
                         "text": filtered, "target": "answer"})
             tail = citation_filter.flush()
             if tail:
+                answer_parts.append(tail)
                 yield stream_sse(sequence, "delta", {
                     "text": tail, "target": "answer"})
-            warnings = []
-            if packed.warning:
-                warnings.append(packed.warning)
             if citation_filter.invalid_ids:
                 warnings.append(
                     "已移除无效引用："
                     + "、".join(sorted(citation_filter.invalid_ids)))
+            final_answer = "".join(answer_parts).strip()
+            if final_answer and labelled and not re.search(r"\[E\d+\]", final_answer):
+                locators = "；".join(
+                    f"[{item['id']}] {item['path']}:{item['start_line']}-{item['end_line']}"
+                    for item in labelled[:5]
+                )
+                footer = f"\n\n证据定位：{locators}"
+                final_answer += footer
+                yield stream_sse(sequence, "delta", {
+                    "text": footer, "target": "answer"})
+                warnings.append("模型未输出代码引用，已附加有效 Evidence 定位")
+            _CONVERSATIONS.append(conversation, "assistant", {
+                "content": final_answer,
+                "evidence": labelled,
+                "trace_id": trace_id,
+            })
+            warnings = list(dict.fromkeys(warnings))
             yield stream_sse(sequence, "complete", {
-                "result": {"path": relative_path},
+                "result": {
+                    "conversation_id": conversation.conversation_id,
+                    "trace_id": trace_id,
+                    "path": relative_path,
+                    "steps_used": steps_used,
+                    "tool_calls_used": tool_calls_used,
+                    "stop_reason": stop_reason,
+                    "tool_protocol": tool_protocol,
+                    "warnings": warnings,
+                    "evidence": labelled,
+                    "input_tokens": input_tokens,
+                },
                 "warnings": warnings,
             })
         except asyncio.CancelledError:
@@ -1194,7 +1592,7 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
             logger.exception("chat failed diagnostic_id=%s", diagnostic_id)
             yield stream_sse(sequence, "error", {
                 "code": "generation_failed", "message": "回答中断",
-                "details": {"diagnostic_id": diagnostic_id}})
+                "details": {"diagnostic_id": diagnostic_id, "trace_id": trace_id}})
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers=SSE_HEADERS)
 

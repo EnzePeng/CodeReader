@@ -33,5 +33,23 @@
     "project_chat_context_tokens": 3000,
     "chat_current_file_tokens": 2000,
     "project_dependency_depth": 2
+  },
+  "agent": {
+    "enabled": true,
+    "protocol": "auto",
+    "max_research_steps": 3,
+    "max_tool_calls": 8,
+    "max_parallel_reads": 3,
+    "planner_max_tokens": 256,
+    "same_call_limit": 2,
+    "no_progress_limit": 2,
+    "wall_time_seconds": 180,
+    "repo_map_tokens": 900,
+    "tool_result_tokens": 1200,
+    "tool_step_tokens": 3200,
+    "context_soft_ratio": 0.75,
+    "context_hard_ratio": 0.9,
+    "session_ttl_minutes": 120,
+    "max_sessions": 64
   }
 }

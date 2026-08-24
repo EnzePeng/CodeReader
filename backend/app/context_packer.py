@@ -1,7 +1,7 @@
 """Token-budget-aware packing of ranked source evidence."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Awaitable, Callable, List, Sequence
 
 from .evidence import Evidence
@@ -64,6 +64,34 @@ class ContextPacker:
             f"{item.content}"
         )
 
+    @staticmethod
+    def _fragments(evidence: Sequence[Evidence]) -> List[Evidence]:
+        """Split oversized spans into independently packable, exact line ranges."""
+        output: List[Evidence] = []
+        for item in evidence:
+            lines = item.content.splitlines()
+            expected = item.end_line - item.start_line + 1
+            if expected <= 120 or len(lines) != expected:
+                output.append(item)
+                continue
+            for index, offset in enumerate(range(0, len(lines), 100)):
+                fragment_lines = lines[offset:offset + 100]
+                metadata = dict(item.metadata)
+                metadata.update({
+                    "continuation": True,
+                    "continuation_index": index,
+                    "parent_span": [item.start_line, item.end_line],
+                })
+                output.append(replace(
+                    item,
+                    start_line=item.start_line + offset,
+                    end_line=item.start_line + offset + len(fragment_lines) - 1,
+                    content="\n".join(fragment_lines),
+                    score=max(0.0, item.score - index * 0.002),
+                    metadata=metadata,
+                ))
+        return output
+
     def pack(self, evidence: Sequence[Evidence]) -> PackedContext:
         reserve_requested = (
             self.output_reserve_tokens
@@ -73,7 +101,7 @@ class ContextPacker:
         reserved = min(self.context_window_tokens, reserve_requested)
         available = max(0, self.context_window_tokens - reserve_requested)
         ordered = sorted(
-            evidence,
+            self._fragments(evidence),
             key=lambda item: (
                 _RELATION_PRIORITY.get(item.relation, 99),
                 -float(item.score),
@@ -127,7 +155,7 @@ class ContextPacker:
         reserved = min(self.context_window_tokens, reserve_requested)
         available = max(0, self.context_window_tokens - reserve_requested)
         ordered = sorted(
-            evidence,
+            self._fragments(evidence),
             key=lambda item: (
                 _RELATION_PRIORITY.get(item.relation, 99),
                 -float(item.score),

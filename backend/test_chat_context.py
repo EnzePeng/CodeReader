@@ -1,118 +1,148 @@
-"""追问上下文端到端测试：同文件 / 跨文件 / 类方法。"""
+import hashlib
 import json
-import shutil
-import sys
-import time
+import os
+import tempfile
+import unittest
 from pathlib import Path
 
-import httpx
-
-BASE = "http://127.0.0.1:8710/api"
-PROJ = Path(__file__).parent / "tmp_chat_ctx_proj"
-PROJ.mkdir(exist_ok=True)
-
-(PROJ / "a.py").write_text(
-    '"""工具库。"""\n\n'
-    "def normalize_scores(raw):\n"
-    '    """把成绩列表按最大值缩放到 0~1 区间。"""\n'
-    "    peak = max(raw) if raw else 1.0\n"
-    "    if peak <= 0:\n"
-    "        return [0.0 for _ in raw]\n"
-    "    return [x / peak for x in raw]\n\n"
-    "class MatrixSolver:\n"
-    '    """极简矩阵求解器。"""\n\n'
-    "    def decompose(self, scores):\n"
-    '        """把得分向量对半拆分后逐项相加。"""\n'
-    "        half = len(scores) // 2\n"
-    "        return [l + r for l, r in zip(scores[:half], scores[half:])]\n",
-    encoding="utf-8")
-(PROJ / "main.py").write_text(
-    '"""主流程。"""\n'
-    "from a import MatrixSolver, normalize_scores\n\n"
-    "def run_pipeline(raw):\n"
-    "    scores = normalize_scores(raw)\n"
-    "    solver = MatrixSolver(len(scores))\n"
-    "    basis = solver.decompose(scores)\n"
-    "    return __LocalSolve(basis)\n\n"
-    "def __LocalSolve(basis):\n"
-    '    """对基向量做位置加权求和并取平均。"""\n'
-    "    total = 0.0\n"
-    "    for i, b in enumerate(basis):\n"
-    "        total += (i + 1) * b\n"
-    "    return total / max(len(basis), 1)\n",
-    encoding="utf-8")
+from app.code_index import CodeIndex
+from app.context_broker import ContextBroker
+from app.conversation import ConversationStore, EvidenceAnchor
+from app.evidence import Evidence
+from app.retriever import Retriever
 
 
-def wait_ready(timeout: float = 120.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            r = httpx.get(BASE + "/health", timeout=5.0).json()
-            if r["llama"]["ready"]:
-                return
-        except Exception:
-            pass
-        time.sleep(2)
-    print("[error] 模型未就绪")
-    sys.exit(1)
+class ContextBrokerAndConversationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.root = base / "project"
+        self.root.mkdir()
+        (self.root / "a.py").write_text(
+            "def foo(value):\n    return 'wrong'\n", encoding="utf-8")
+        long_body = ["def foo(value):", "    total = value"]
+        long_body.extend("    total += 1" for _ in range(260))
+        long_body.append("    return total")
+        (self.root / "z.py").write_text("\n".join(long_body) + "\n", encoding="utf-8")
+        (self.root / "consumer.py").write_text(
+            "from z import foo\n\ndef run(value):\n    return foo(value)\n", encoding="utf-8")
+        (self.root / "dynamic.py").write_text(
+            "import a\nimport z\n\ndef choose(module, value):\n"
+            "    return module.foo(value)\n",
+            encoding="utf-8",
+        )
+        self.index = CodeIndex(base / "index.db")
+        self.index.index_project(self.root)
+        self.retriever = Retriever(self.index, self.root)
+        self.broker = ContextBroker(self.index, self.retriever, self.root, repo_map_tokens=900)
 
+    def tearDown(self) -> None:
+        self.temp.cleanup()
 
-def ask(main_path: str, line: int, question: str) -> str:
-    parts: list[str] = []
-    with httpx.stream("POST", BASE + "/chat",
-                      json={
-                          "path": main_path,
-                          "question": question,
-                          "selection": {"start_line": line, "end_line": line},
-                          "history": [],
-                          "project_root": str(PROJ),
-                      },
-                      timeout=httpx.Timeout(300, connect=10)) as resp:
-        assert resp.status_code == 200, resp.status_code
-        event = ""
-        for ln in resp.iter_lines():
-            if ln.startswith("event:"):
-                event = ln[6:].strip()
-            elif ln.startswith("data:"):
-                data = json.loads(ln[5:])
-                if event == "delta":
-                    parts.append(data["text"])
-                elif event == "error":
-                    print("[error]", data["message"])
-                    sys.exit(1)
-    return "".join(parts)
+    def test_import_disambiguation_and_long_function_windows_are_prefetched(self) -> None:
+        result = self.broker.collect(
+            "foo 这个函数内部怎么实现", "consumer.py", selection=(4, 4))
+        exact = [item for item in result.evidence
+                 if item.metadata.get("resolution") == "exact" and item.symbol == "foo"]
+        self.assertTrue(result.sufficient)
+        self.assertTrue(result.direct_target)
+        self.assertTrue(exact)
+        self.assertEqual({item.path for item in exact}, {"z.py"})
+        windows = [item for item in result.evidence
+                   if item.path == "z.py" and item.metadata.get("continuation")]
+        self.assertGreaterEqual(len(windows), 2)
+        self.assertTrue(windows[0].content.startswith("def foo"))
+        self.assertIn("z.py", result.repository_map)
+        self.assertIn("foo", result.repository_map)
+        self.assertFalse(any(
+            item.path == "a.py" and item.relation == "definition"
+            for item in result.evidence
+        ))
 
+    def test_stale_anchor_is_reindexed_rejected_and_retrieval_uses_new_source(self) -> None:
+        path = self.root / "z.py"
+        before = path.read_bytes()
+        stat = path.stat()
+        anchor = EvidenceAnchor(
+            "z.py", 1, 10, hashlib.sha256(before).hexdigest(), "foo")
+        changed = before.replace(b"total += 1", b"total += 2")
+        self.assertEqual(len(before), len(changed))
+        path.write_bytes(changed)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
 
-def main() -> None:
-    PROJ.mkdir(exist_ok=True)
-    wait_ready()
-    main_py = str(PROJ / "main.py")
+        result = self.broker.collect(
+            "foo 这个函数内部怎么实现", "consumer.py", anchors=[anchor])
 
-    # 场景 1：同文件私有函数（模拟用户 TFAITest 场景：选中调用行）
-    ans1 = ask(main_py, 8, "这个函数是在哪个文件实现的？这个函数里面做了什么？")
-    print("[场景1 同文件 __LocalSolve]")
-    print(ans1[:600])
-    assert "main.py" in ans1, ans1
-    assert "total" in ans1 or "加权" in ans1 or "enumerate" in ans1, ans1
-    bad1 = ("没有在提供的代码上下文" in ans1 or "需要查看其他文件" in ans1
-            or "无法确定该函数所在" in ans1 or "逻辑缺失" in ans1)
-    assert not bad1, "模型仍声称缺少上下文"
+        self.assertTrue(any("已拒绝" in warning for warning in result.warnings))
+        self.assertTrue(all(item.validate(self.root) for item in result.evidence))
+        self.assertTrue(any("total += 2" in item.content for item in result.evidence
+                            if item.path == "z.py"))
 
-    # 场景 2：跨文件函数（选中 normalize_scores 调用行）
-    ans2 = ask(main_py, 5, "normalize_scores 在哪个文件定义？里面做了什么？")
-    print("\n[场景2 跨文件 normalize_scores]")
-    print(ans2[:600])
-    assert "a.py" in ans2, ans2
+    def test_explicit_multi_hop_question_requires_research(self) -> None:
+        result = self.broker.collect("foo 的两跳调用链和最终调用是什么", "consumer.py")
+        self.assertFalse(result.sufficient)
+        self.assertFalse(result.direct_target)
+        self.assertIn("多跳", result.reason)
 
-    # 场景 3：类方法（选中 decompose 调用行）
-    ans3 = ask(main_py, 7, "decompose 方法在哪个文件的哪个类里？它做了什么？")
-    print("\n[场景3 类方法 decompose]")
-    print(ans3[:600])
-    assert "MatrixSolver" in ans3 and ("a.py" in ans3 or "decompose" in ans3), ans3
+    def test_direct_callee_question_does_not_become_caller_focus(self) -> None:
+        direct = self.broker.collect("它调用的 foo 具体怎么实现", "consumer.py")
+        callers = self.broker.collect("谁调用了 foo", "consumer.py")
+        self.assertTrue(direct.direct_target)
+        self.assertFalse(callers.direct_target)
 
-    shutil.rmtree(PROJ, ignore_errors=True)
-    print("\n全部场景通过 ✓")
+    def test_one_exact_identifier_does_not_hide_another_ambiguous_identifier(self) -> None:
+        result = self.broker.collect(
+            "choose 里的 module.foo 实际绑定 a.py 还是 z.py", "dynamic.py"
+        )
+        self.assertFalse(result.sufficient)
+        self.assertIn("同名候选", result.reason)
+        candidates = {
+            item.path for item in result.evidence
+            if item.symbol == "foo"
+            and item.metadata.get("resolution") == "ambiguous_candidate"
+        }
+        self.assertEqual(candidates, {"a.py", "z.py"})
+
+    def test_exact_resolution_replaces_higher_scored_same_span_anchor(self) -> None:
+        shared = {
+            "path": "a.py", "start_line": 1, "end_line": 2,
+            "content": "def foo(value):\n    return 'wrong'",
+            "source_hash": self.index.file_record(self.root, "a.py")["source_hash"],
+            "language": "python", "relation": "definition", "symbol": "foo",
+        }
+        anchor = Evidence(**shared, score=2.0, metadata={"resolution": "anchor"})
+        exact = Evidence(**shared, score=1.0, metadata={"resolution": "exact"})
+
+        deduped = ContextBroker._dedupe([anchor, exact])
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0].metadata["resolution"], "exact")
+
+    def test_project_scoped_conversation_survives_file_switch_without_source_retention(self) -> None:
+        store = ConversationStore(ttl_minutes=120, max_sessions=2)
+        conversation, created = store.get_or_create(
+            None, "browser", "project", "consumer.py")
+        self.assertTrue(created)
+        store.append(conversation, "tool_result", {
+            "content": "SECRET SOURCE BODY",
+            "evidence": [{
+                "path": "z.py", "start_line": 1, "end_line": 10,
+                "source_hash": "abc", "symbol": "foo", "content": "SECRET",
+            }],
+        })
+        same, created = store.get_or_create(
+            conversation.conversation_id, "browser", "project", "z.py")
+        self.assertFalse(created)
+        self.assertIs(same, conversation)
+        self.assertEqual(same.active_path, "z.py")
+        self.assertEqual(same.anchors[0].symbol, "foo")
+        self.assertNotIn("SECRET", json.dumps(same.events[-1].payload))
+
+        other, created = store.get_or_create(
+            conversation.conversation_id, "browser", "another-project", "z.py")
+        self.assertTrue(created)
+        self.assertNotEqual(other.conversation_id, conversation.conversation_id)
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()
