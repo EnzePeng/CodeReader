@@ -15,6 +15,7 @@ import re
 import sqlite3
 import threading
 import time
+import warnings
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -239,6 +240,7 @@ class _PythonVisitor(ast.NodeVisitor):
         self.type_scopes: List[Dict[str, Tuple[str, str]]] = [{}]
         self.attribute_types: Dict[Tuple[str, str], Tuple[str, str]] = {}
         self.symbols: List[Dict[str, Any]] = []
+        self.symbol_positions: Dict[str, int] = {}
         self.calls: List[Dict[str, Any]] = []
         self.imports: List[Dict[str, Any]] = []
 
@@ -321,10 +323,11 @@ class _PythonVisitor(ast.NodeVisitor):
                 doc = ""
         except (TypeError, IndexError):
             doc = ""
-        self.symbols.append({
+        symbol_key = f"{self.module_name}:{qualified}"
+        symbol = {
             "name": name,
             "qualified_name": qualified,
-            "symbol_key": f"{self.module_name}:{qualified}",
+            "symbol_key": symbol_key,
             "kind": kind,
             "start_line": start,
             "end_line": end,
@@ -332,7 +335,18 @@ class _PythonVisitor(ast.NodeVisitor):
             "doc": doc,
             "parent": self.stack[-1][0] if self.stack else "",
             "bases": [ast.unparse(base) for base in getattr(node, "bases", [])],
-        })
+        }
+        previous = self.symbol_positions.get(symbol_key)
+        if previous is None:
+            self.symbol_positions[symbol_key] = len(self.symbols)
+            self.symbols.append(symbol)
+        else:
+            # Python permits repeated definitions in one scope. Common examples
+            # include @overload stubs, property getter/setter pairs and conditional
+            # compatibility definitions. The final binding wins at runtime, so keep
+            # that definition as the canonical semantic symbol. Full source text is
+            # still retained by the text index.
+            self.symbols[previous] = symbol
         return qualified
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -490,7 +504,12 @@ def _extract_python(
     try:
         # On Python 3.13 this naturally accepts 3.13 nodes.  Older runtimes report a
         # parse error, after which the file remains fully available through FTS.
-        tree = ast.parse(source, type_comments=True)
+        # Invalid escape sequences in indexed source are findings about that source,
+        # not CodeReader runtime failures. Keep them from leaking into the launcher
+        # console while preserving real parse errors below.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source, type_comments=True)
     except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
         message = f"{exc.__class__.__name__}: {exc}"
         return [], [], [], message[:1000]

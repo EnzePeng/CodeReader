@@ -145,6 +145,39 @@ class CodeIndexEvidenceTest(unittest.TestCase):
         source.write_text("def helper():\n    return 2\n", encoding="utf-8")
         self.assertFalse(evidence.validate(self.root))
 
+    def test_repeated_python_definitions_keep_the_runtime_binding(self) -> None:
+        from app.code_index import CodeIndex
+
+        source = self.root / "overloads.py"
+        source.write_text(
+            "from typing import overload\n\n"
+            "@overload\n"
+            "def convert(value: int) -> int: ...\n\n"
+            "@overload\n"
+            "def convert(value: str) -> str: ...\n\n"
+            "def convert(value):\n"
+            "    return value\n\n"
+            "class Record:\n"
+            "    @property\n"
+            "    def value(self):\n"
+            "        return self._value\n\n"
+            "    @value.setter\n"
+            "    def value(self, new_value):\n"
+            "        self._value = new_value\n",
+            encoding="utf-8",
+        )
+        index = CodeIndex(self.db)
+
+        status = index.index_project(self.root)
+
+        self.assertEqual(1, status.indexed_files)
+        convert = index.symbol_rows(self.root, "convert")
+        value = index.symbol_rows(self.root, "value")
+        self.assertEqual(1, len(convert))
+        self.assertEqual(1, len(value))
+        self.assertEqual(9, convert[0]["start_line"])
+        self.assertEqual(17, value[0]["start_line"])
+
 
 if __name__ == "__main__":
     unittest.main()

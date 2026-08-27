@@ -8,6 +8,7 @@
 import ast
 import hashlib
 import re
+import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # 超过该行数的类会被拆成 类头 + 各方法
@@ -167,7 +168,9 @@ def _outline_from_ast(tree: ast.Module) -> List[Dict[str, Any]]:
 
 def segment_python_ast(source: str) -> Optional[Dict[str, Any]]:
     try:
-        tree = ast.parse(source)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
     except (SyntaxError, ValueError, MemoryError, RecursionError):
         return None
 

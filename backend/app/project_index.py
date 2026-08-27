@@ -12,6 +12,7 @@ import os
 import re
 import textwrap
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
@@ -133,7 +134,9 @@ def _extract_file(path: Path, rel: str) -> Optional[Dict[str, Any]]:
         text = _decode(data)
         if text is None:
             return None
-        tree = ast.parse(text)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(text)
     except Exception:
         return None
 
@@ -453,7 +456,9 @@ def _format_entry(entry: Dict[str, Any]) -> str:
 
 def _analyze_code(code: str) -> Tuple[List[Dict[str, str]], Dict[str, str]]:
     try:
-        tree = ast.parse(textwrap.dedent(code))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(textwrap.dedent(code))
         return _analyze_node(tree)
     except Exception:
         return [], {}
