@@ -10,6 +10,7 @@ llama.cpp/
 # Python
 __pycache__/
 *.pyc
+.coverage
 .venv/
 .uv-cache/
 .npm-cache/

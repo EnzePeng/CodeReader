@@ -1,0 +1,112 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  windows-package:
+    runs-on: windows-latest
+    needs: secrets
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.7"
+          enable-cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          uv sync --frozen --all-groups
+          npm --prefix frontend ci
+
+      - name: Run backend quality gates
+        run: |
+          uv run ruff check backend
+          uv run mypy backend/app
+          uv run coverage run -m unittest discover -s backend -p "test_*.py"
+          uv run coverage report
+          uv run pip-audit
+          uv run python -m compileall -q backend/app
+
+      - name: Run frontend quality gates
+        run: |
+          npm --prefix frontend run typecheck
+          npm --prefix frontend test
+          npm --prefix frontend audit --audit-level=high
+
+      - name: Build lightweight Windows package
+        run: powershell -ExecutionPolicy Bypass -File scripts/build_exe.ps1 -SkipModel -SkipRuntime
+
+      - name: Smoke-test packaged executable
+        run: powershell -ExecutionPolicy Bypass -File scripts/smoke_package.ps1
+
+      - name: Verify excluded files and create archive
+        id: package
+        shell: pwsh
+        run: |
+          $smokeLog = "release/CodeReader/data/app.log"
+          if (Test-Path -LiteralPath $smokeLog) {
+            Remove-Item -LiteralPath $smokeLog -Force
+          }
+          if (Test-Path release/CodeReader/llama/llama-server.exe) {
+            throw "Release must not contain llama-server.exe"
+          }
+          if (Get-ChildItem release/CodeReader/models -Filter *.gguf -File) {
+            throw "Release must not contain GGUF model files"
+          }
+
+          $archive = Join-Path $PWD "release/CodeReader-windows-x64-$env:GITHUB_REF_NAME.zip"
+          Compress-Archive -Path release/CodeReader/* -DestinationPath $archive -CompressionLevel Optimal
+          $checksum = "$archive.sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          "$hash  $([System.IO.Path]::GetFileName($archive))" |
+            Set-Content -LiteralPath $checksum -Encoding ascii
+
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ARCHIVE: ${{ steps.package.outputs.archive }}
+          RELEASE_CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            $env:RELEASE_ARCHIVE `
+            $env:RELEASE_CHECKSUM `
+            --verify-tag `
+            --generate-notes `
+            --title "CodeReader $env:GITHUB_REF_NAME"

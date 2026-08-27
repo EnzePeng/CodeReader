@@ -6,6 +6,7 @@
 #   可选参数：
 #     -SkipFrontend   跳过前端构建（frontend\dist 已是最新时）
 #     -SkipModel      不拷贝模型文件（部署包体积小，模型另行拷贝）
+#     -SkipRuntime    不拷贝 llama.cpp（部署包体积小，运行时另行下载）
 
 param(
     [switch]$SkipFrontend,
@@ -15,7 +16,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$out = Join-Path $root "release\CodeReader"
+$releaseRoot = [System.IO.Path]::GetFullPath((Join-Path $root "release"))
+$out = [System.IO.Path]::GetFullPath((Join-Path $releaseRoot "CodeReader"))
+$releasePrefix = $releaseRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) +
+    [System.IO.Path]::DirectorySeparatorChar
+if (-not $out.StartsWith($releasePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "拒绝清理非 release 目录: $out"
+}
 
 Write-Host "== CodeReader 打包 ==" -ForegroundColor Cyan
 Write-Host "项目根目录: $root"
@@ -43,6 +50,10 @@ if (-not (Test-Path (Join-Path $root "frontend\dist\index.html"))) {
 
 # 2. PyInstaller 打包 exe
 Write-Host "`n[2/4] PyInstaller 打包…" -ForegroundColor Cyan
+if (Test-Path -LiteralPath $out) {
+    Remove-Item -LiteralPath $out -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $out | Out-Null
 Push-Location (Join-Path $root "backend")
 uv run --frozen pyinstaller --noconfirm --clean --onefile run.py --name CodeReader `
     --distpath $out `
@@ -70,18 +81,20 @@ if (-not $SkipRuntime) {
     Copy-Item (Join-Path $root "llama\llama-server.exe") $llamaOut -Force
     Copy-Item (Join-Path $root "llama\*.dll") $llamaOut -Force
 } else {
-    Write-Host "跳过 llama-server 运行时（仅用于 CI 启动冒烟）" -ForegroundColor Yellow
+    Copy-Item (Join-Path $root "packaging\llama-runtime-README.txt") (Join-Path $llamaOut "README.txt") -Force
+    Write-Host "跳过 llama-server 运行时（请按 README.txt 下载）" -ForegroundColor Yellow
 }
 
 New-Item -ItemType Directory -Force (Join-Path $out "data") | Out-Null
 
+$modelsOut = Join-Path $out "models"
+New-Item -ItemType Directory -Force $modelsOut | Out-Null
 if (-not $SkipModel) {
     Write-Host "拷贝 models\ 下全部 GGUF（当前约 10 GB，需要一点时间）…"
-    $modelsOut = Join-Path $out "models"
-    New-Item -ItemType Directory -Force $modelsOut | Out-Null
     Copy-Item (Join-Path $root "models\*.gguf") $modelsOut -Force
 } else {
-    Write-Host "跳过模型拷贝（记得把 models\*.gguf 手动放进部署包）" -ForegroundColor Yellow
+    Copy-Item (Join-Path $root "packaging\models-README.txt") (Join-Path $modelsOut "README.txt") -Force
+    Write-Host "跳过模型拷贝（请按 README.txt 下载）" -ForegroundColor Yellow
 }
 
 Copy-Item (Join-Path $root "README.md") (Join-Path $out "使用说明.md") -Force

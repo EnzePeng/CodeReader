@@ -3,6 +3,8 @@
 在浏览器里打开你的项目，选择一个代码文件：**左边看代码，右边看逐段中文解读**。
 全程本地运行（llama.cpp + 本地 GGUF 大模型），不需要任何网络，代码不出本机，适合公司内网环境。
 
+[下载最新 Windows 版本](https://github.com/EnzePeng/CodeReader/releases/latest)
+
 ## 功能
 
 - **逐段中文解读**：Python 文件按 AST 精准切分（模块说明 / 导入 / 全局定义 / 类 / 函数 / 入口），逐段流式生成中文讲解；其他语言按通用规则分块解读
@@ -29,8 +31,8 @@
 code-reader/
 ├── backend/            # FastAPI 后端（分段、解读编排、缓存、llama-server 托管）
 ├── frontend/           # React + Monaco 前端（构建产物 dist/ 由后端托管）
-├── llama/              # llama.cpp Windows CUDA 二进制（llama-server.exe + DLL）
-├── models/             # GGUF 模型文件
+├── llama/              # llama.cpp Windows 运行时（需单独下载）
+├── models/             # GGUF 模型文件（需单独下载）
 ├── data/               # 运行数据：解读缓存 cache.db、llama-server.log、最近打开记录
 ├── scripts/            # 打包脚本
 └── config.json         # 运行配置
@@ -55,6 +57,24 @@ cd ../backend
 python run.py
 ```
 
+## 下载与安装
+
+GitHub Release 提供轻量 Windows x64 压缩包，**不包含 llama.cpp 和 GGUF 模型**。这样安装包更小，也便于按目标机器的显卡选择推理后端和模型。
+
+1. 从 [Releases](https://github.com/EnzePeng/CodeReader/releases/latest) 下载 `CodeReader-windows-x64-v*.zip` 并解压。
+2. 从 [llama.cpp 官方 Releases](https://github.com/ggml-org/llama.cpp/releases/latest) 下载运行时：
+   - NVIDIA 显卡：下载 Windows x64 CUDA 12.4 主压缩包和对应的 `cudart` 压缩包，将两者解压到同一个 `llama/` 目录。
+   - 仅使用 CPU：下载 Windows x64 CPU 压缩包并解压到 `llama/`。
+   - AMD/Intel 显卡：下载 Windows x64 Vulkan 压缩包并解压到 `llama/`。
+   - 解压完成后应直接存在 `llama/llama-server.exe`，不要再多套一层目录。
+3. 下载至少一个 GGUF 模型并放入 `models/`：
+   - 默认模型：[Qwen3.5-9B Q4_K_M](https://huggingface.co/lmstudio-community/Qwen3.5-9B-GGUF/blob/main/Qwen3.5-9B-Q4_K_M.gguf)（社区 GGUF 转换）。
+   - 更轻量：[Qwen2.5-Coder-7B-Instruct GGUF](https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/tree/main)（Qwen 官方仓库，选择 Q4_K_M 文件）。
+4. 将 `config.json` 中的 `llama.model` 改成实际下载的文件名。默认值是 `Qwen3.5-9B.Q4_K_M.gguf`；若下载文件名为 `Qwen3.5-9B-Q4_K_M.gguf`，也可以直接将文件重命名为默认值。
+5. 双击 `CodeReader.exe`，浏览器会打开 http://127.0.0.1:8710；关闭控制台窗口即退出。
+
+目标机器支持 Windows 10/11 x64。CUDA 包要求 NVIDIA 驱动支持对应 CUDA 版本，但无需安装 CUDA Toolkit；CPU 包不要求独立显卡。
+
 ## 打包与内网离线部署
 
 在有网的开发机上执行：
@@ -63,22 +83,35 @@ python run.py
 powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 ```
 
+默认本地构建会包含已有的 llama.cpp 运行时和模型。构建与 GitHub Release 相同的轻量包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1 -SkipRuntime -SkipModel
+```
+
 产物为 `release\CodeReader\` 文件夹：
 
 ```
 CodeReader/
 ├── CodeReader.exe      # 主程序（内嵌 Python 运行时与前端页面）
 ├── config.json         # 配置（模型路径、端口、显存参数等）
-├── llama/              # llama.cpp 推理引擎（含 CUDA 运行库，无需安装 CUDA）
-├── models/             # GGUF 模型
+├── llama/              # llama.cpp 推理引擎，轻量包内只有下载说明
+├── models/             # GGUF 模型，轻量包内只有下载说明
 └── 使用说明.md
 ```
 
-**部署**：把整个 `CodeReader` 文件夹拷贝（U 盘 / 内网共享）到目标机器，双击 `CodeReader.exe`，
-程序会自动加载模型并打开浏览器（http://127.0.0.1:8710）。关闭控制台窗口即退出。
+离线部署时，先在有网机器上按“下载与安装”补齐 `llama/` 和 `models/`，再把整个 `CodeReader` 文件夹通过 U 盘或内网共享复制到目标机器。
 
-目标机器要求：Windows 10/11 x64 + NVIDIA 显卡（驱动支持 CUDA 12.4+，无需安装 CUDA Toolkit）。
-若目标机是 AMD/Intel 显卡，请从 llama.cpp Releases 下载对应的 Vulkan 版压缩包替换 `llama/` 目录内容。
+## 发布 GitHub Release
+
+推送 `v` 开头的 Git 标签后，GitHub Actions 会执行后端、前端和打包冒烟测试，并自动创建 Release：
+
+```powershell
+git tag v2.0.0
+git push origin v2.0.0
+```
+
+Release 附件包含轻量 ZIP 和对应的 SHA-256 校验文件，不会上传 `llama-server.exe`、DLL 或任何 `.gguf` 模型。
 
 ## 配置说明（config.json）
 
@@ -87,7 +120,7 @@ CodeReader/
 | `app_port` | Web 界面端口（默认 8710） |
 | `llama.model` | `models/` 下的 GGUF 文件名；不接受绝对路径或 `..` |
 | `llama.think_prefill` | 思考块预填策略：`auto`（按模型名判断，qwen3/qwq 等思考型自动启用）/ `on` / `off` |
-| `llama.ctx_size` | 上下文长度（默认 8192，显存紧张可降到 4096） |
+| `llama.ctx_size` | 上下文长度（默认 16384，显存紧张可降到 8192 或 4096） |
 | `llama.n_gpu_layers` | GPU 加载层数（默认 99 全量；显存不足可调小，如 24） |
 | `llama.cache_type_k/v` | KV 缓存量化（默认 q8_0 省显存） |
 | `llama.thinking` | 思考模式开关（默认 false。思考型模型开启后解读更深但每段慢几十秒；可在顶栏「思考开/关」按钮切换，写回 config.json） |

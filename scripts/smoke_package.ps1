@@ -13,6 +13,11 @@ if (-not $target.StartsWith($expectedRoot, [StringComparison]::OrdinalIgnoreCase
 $exe = Join-Path $target "CodeReader.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing $exe" }
 
+$existingPackagePids = @(
+    Get-CimInstance Win32_Process |
+        Where-Object { $_.ExecutablePath -eq $exe } |
+        Select-Object -ExpandProperty ProcessId
+)
 $process = Start-Process -FilePath $exe -ArgumentList "--port", $Port, "--no-browser" -PassThru -WindowStyle Hidden
 try {
     $deadline = (Get-Date).AddMinutes(5)
@@ -27,8 +32,20 @@ try {
     if ((Get-Date) -ge $deadline) { throw "Cold-start smoke test timed out" }
 } finally {
     if (-not $process.HasExited) {
-        Stop-Process -Id $process.Id
+        Stop-Process -Id $process.Id -Force
         $process.WaitForExit(10000) | Out-Null
+    }
+    $packageProcesses = @(
+        Get-CimInstance Win32_Process |
+            Where-Object {
+                $_.ExecutablePath -eq $exe -and $_.ProcessId -notin $existingPackagePids
+            }
+    )
+    foreach ($packageProcess in $packageProcesses) {
+        Stop-Process -Id $packageProcess.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($packageProcess in $packageProcesses) {
+        Wait-Process -Id $packageProcess.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
     }
 }
 
