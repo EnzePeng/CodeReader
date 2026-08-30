@@ -115,6 +115,15 @@ class ModelBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(profile["temperature"], 0.3)
         self.assertFalse(profile["enable_thinking"])
 
+    async def test_generation_profile_uses_user_confirmed_sampling_values(self) -> None:
+        cfg = {"temperature": 0.35, "top_p": 0.77, "top_k": 42}
+        with mock.patch.object(llm, "_llama_cfg", return_value=cfg):
+            profile = llm.generation_profile(thinking=True)
+        self.assertEqual(profile["temperature"], 0.35)
+        self.assertEqual(profile["top_p"], 0.77)
+        self.assertEqual(profile["top_k"], 42)
+        self.assertTrue(profile["enable_thinking"])
+
     async def test_token_count_uses_model_tokenizer(self) -> None:
         client = _TokenClient()
         cfg = {"base_url": "http://127.0.0.1:8711"}

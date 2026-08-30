@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import cache, explainer, llama_launcher, llm, segmenter
+from . import cache, explainer, llama_launcher, llm, model_settings, segmenter
 from .citations import CitationFilter, EvidenceCatalog
 from .config import (
     APP_VERSION,
@@ -493,6 +493,64 @@ async def config_info() -> Dict[str, Any]:
         "ctx_size": cfg["llama"]["ctx_size"],
         "temperature": cfg["llama"]["temperature"],
         "cache": cache.stats(),
+    }
+
+
+@router.get("/model-settings")
+async def get_model_settings() -> Dict[str, Any]:
+    """Expose only the curated, safe-to-edit model tuning surface."""
+    return model_settings.settings_payload()
+
+
+@router.post("/model-settings/recommend")
+async def recommend_model_settings() -> Dict[str, Any]:
+    """Ask the already-running model to recommend settings without applying them."""
+    if not await llm.health_check():
+        raise HTTPException(status_code=409, detail={
+            "code": "model_not_ready",
+            "message": "模型就绪后才能生成参数建议",
+        })
+    payload = model_settings.settings_payload()
+    try:
+        result = await llm.structured_complete(
+            model_settings.recommendation_messages(payload),
+            model_settings.recommendation_schema(),
+            max_tokens=900,
+        )
+        return model_settings.public_recommendation(result, payload)
+    except Exception as exc:
+        diagnostic_id = _diagnostic_id()
+        logger.exception(
+            "model settings recommendation failed diagnostic_id=%s", diagnostic_id)
+        raise HTTPException(status_code=502, detail={
+            "code": "recommendation_failed",
+            "message": "模型未能生成有效的参数建议，请稍后重试",
+            "details": {"diagnostic_id": diagnostic_id},
+        }) from exc
+
+
+@router.post("/model-settings")
+async def set_model_settings(body: model_settings.ModelTuningValues) -> Dict[str, Any]:
+    """Persist user-confirmed settings and restart only when llama.cpp needs it."""
+    previous = model_settings.current_values().model_dump()
+    requested = body.model_dump()
+    restart_required = any(
+        previous[key] != requested[key] for key in model_settings.RESTART_FIELDS
+    )
+
+    def _upd(raw: Dict[str, Any]) -> None:
+        raw.setdefault("llama", {}).update(requested)
+
+    update_config_file(_upd)
+    if restart_required:
+        await llama_launcher.stop_async()
+        await llm.close_client()
+        llama_launcher.reset_cooldown()
+        llama_launcher.schedule_ensure_running()
+    return {
+        "ok": True,
+        "restarting": restart_required,
+        **model_settings.settings_payload(),
     }
 
 

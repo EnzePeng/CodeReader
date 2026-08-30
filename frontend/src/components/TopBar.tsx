@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { getJSON, postJSON, encodePath } from '../api'
 import { useDialogFocus } from '../hooks'
 import { BrowseResult, Health } from '../types'
+import ModelSettingsDialog from './ModelSettingsDialog'
 
 interface ModelItem { name: string; size_gb: number | null }
 
@@ -109,6 +110,7 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
   const [pendingModel, setPendingModel] = useState<string | null>(null)
   const [togglingThink, setTogglingThink] = useState(false)
   const [opening, setOpening] = useState(false)
+  const [showModelSettings, setShowModelSettings] = useState(false)
 
   const toggleThinking = async () => {
     if (!health?.thinking?.supported || togglingThink) return
@@ -258,6 +260,10 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
           <span className="think-dot" />思考{health.thinking.enabled ? '开' : '关'}
         </button>
       )}
+      <button className="model-settings-button" onClick={() => setShowModelSettings(true)}
+        aria-label="打开模型参数设置" title="模型参数与硬件推荐">
+        <span aria-hidden="true">⚙</span><span className="model-settings-button-label">参数</span>
+      </button>
       <div className={`status-pill ${statusClass}`} title={st?.detail || ''}>
         <span className="dot" />{statusText}
       </div>
@@ -265,6 +271,13 @@ export default function TopBar({ health, projectRoot, onOpenProject, onRefreshHe
         <FolderPicker
           onClose={() => setShowPicker(false)}
           onSelect={p => { setShowPicker(false); setInput(p); tryOpen(p) }}
+        />
+      )}
+      {showModelSettings && (
+        <ModelSettingsDialog
+          modelReady={!!st?.ready}
+          onClose={() => setShowModelSettings(false)}
+          onApplied={onRefreshHealth}
         />
       )}
     </header>

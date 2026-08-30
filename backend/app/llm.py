@@ -392,19 +392,13 @@ def is_thinking_model(cfg: Dict[str, Any]) -> bool:
 
 
 def generation_profile(*, thinking: bool) -> Dict[str, Any]:
-    """Stable task profiles, with no-thinking as the fast default."""
-    if thinking:
-        return {
-            "enable_thinking": True,
-            "temperature": 0.6,
-            "top_p": 0.95,
-            "top_k": 20,
-        }
+    """Build the live sampling profile from user-confirmed configuration."""
+    cfg = _llama_cfg()
     return {
-        "enable_thinking": False,
-        "temperature": 0.2,
-        "top_p": 0.8,
-        "top_k": 20,
+        "enable_thinking": thinking,
+        "temperature": float(cfg.get("temperature", 0.2)),
+        "top_p": float(cfg.get("top_p", 0.9)),
+        "top_k": int(cfg.get("top_k", 20)),
     }
 
 

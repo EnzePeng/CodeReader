@@ -107,8 +107,8 @@ CodeReader/
 推送 `v` 开头的 Git 标签后，GitHub Actions 会执行后端、前端和打包冒烟测试，并自动创建 Release：
 
 ```powershell
-git tag v2.0.0
-git push origin v2.0.0
+git tag v2.1.0
+git push origin v2.1.0
 ```
 
 Release 附件包含轻量 ZIP 和对应的 SHA-256 校验文件，不会上传 `llama-server.exe`、DLL 或任何 `.gguf` 模型。

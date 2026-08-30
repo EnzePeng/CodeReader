@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 APP_NAME = "CodeReader"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 
 
 class LlamaSettings(BaseModel):

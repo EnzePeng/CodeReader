@@ -1,6 +1,6 @@
 [project]
 name = "codereader"
-version = "2.0.0"
+version = "2.1.0"
 description = "Offline, evidence-grounded Python project reader"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
